@@ -4,14 +4,30 @@
   "scripts": {
     "server": "node server.js",
     "client": "npm --prefix client run dev",
-    "dev": "concurrently -k -n server,client -c cyan,magenta npm:server npm:client"
+    "dev": "concurrently -k -n server,client -c cyan,magenta npm:server npm:client",
+    "start": "node server.js"
   },
   "dependencies": {
-    "axios": "^1.7.9",
-    "cors": "^2.8.5",
-    "express": "^4.21.2"
+    "axios": "^1.17.0",
+    "cors": "^2.8.6",
+    "express": "^4.22.2"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"
-  }
+  },
+  "version": "1.0.0",
+  "description": "",
+  "main": "server.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ntirushwajeanmarc/muhura_sod3.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/ntirushwajeanmarc/muhura_sod3/issues"
+  },
+  "homepage": "https://github.com/ntirushwajeanmarc/muhura_sod3#readme"
 }
