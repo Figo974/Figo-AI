@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: figoai-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: figoai
+    ports:
+      - "5432:5432"
+    volumes:
+      - figoai-postgres-data:/var/lib/postgresql/data
+
+volumes:
+  figoai-postgres-data:

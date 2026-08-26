@@ -1,22 +1,35 @@
 {
-  "name": "chatbot",
+  "name": "figoai-server",
   "private": true,
+  "description": "FigoAI backend — Express API for Groq-powered chat with PostgreSQL-backed user accounts",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
     "server": "node server.js",
     "client": "npm --prefix client run dev",
     "dev": "concurrently -k -n server,client -c cyan,magenta npm:server npm:client",
+    "build": "npm --prefix client install && npm --prefix client run build",
     "start": "node server.js"
   },
   "dependencies": {
+    "@simplewebauthn/server": "^13.3.2",
     "axios": "^1.17.0",
+    "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
-    "express": "^4.22.2"
+    "dotenv": "^17.4.2",
+    "express": "^4.22.2",
+    "jsonwebtoken": "^9.0.3",
+    "mammoth": "^1.12.1",
+    "nodemailer": "^9.0.5",
+    "pdf-parse": "^2.4.5",
+    "pg": "^8.23.0",
+    "word-extractor": "^1.0.4"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"
   },
   "version": "1.0.0",
-  "description": "",
   "main": "server.js",
   "repository": {
     "type": "git",

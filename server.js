@@ -1,29 +1,181 @@
+require("dotenv").config({ quiet: true });
+
+const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
 const express = require("express");
 const axios = require("axios");
 const cors = require("cors");
 
-console.log("Starting Ollama Chat Server...");
+const { PDFParse } = require("pdf-parse");
+const mammoth = require("mammoth");
+const WordExtractor = require("word-extractor");
+const { pool, initDb } = require("./db");
+const { hashPassword, verifyPassword, signToken, authenticate } = require("./auth");
+const { registerOAuthRoutes } = require("./oauth");
+const { registerWebauthnRoutes } = require("./webauthn");
+const { createSession, registerSessionRoutes } = require("./sessions");
+const { registerAdvancedSecurityRoutes } = require("./advancedSecurity");
+const { registerFamilyRoutes } = require("./family");
+const { registerAdminRoutes } = require("./admin");
+const { sendPasswordResetEmail, sendPasswordChangedEmail, isEmailConfigured } = require("./mailer");
+
+console.log("Starting FigoAI server...");
 
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+// Default express.json() limit (100kb) is way too small for base64 voice
+// recordings — bump it so /api/voice/transcribe can actually receive one.
+app.use(express.json({ limit: "30mb" }));
 
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
-const OLLAMA_URL = "http://127.0.0.1:11434/api/chat";
-// Override with OLLAMA_MODEL env var. gemma3:4b-it-qat needs ~5.3 GiB RAM.
-const MODEL = process.env.OLLAMA_MODEL || "gemma3:270m";
+const AI_URL = "https://api.groq.com/openai/v1/chat/completions";
+const VOICE_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
+const AI_API_KEY = process.env.GROQ_API_KEY;
+// groq/compound gives real web-search-grounded answers, but its free-tier token
+// budget is small and shared across all compound calls, so it's opt-in rather
+// than the default — the default model always answers reliably, if not live.
+// A separate key for it (falling back to the main one) keeps that shared,
+// easily-exhausted budget from competing with normal chat traffic.
+const SEARCH_API_KEY = process.env.GROQ_SEARCH_API_KEY || AI_API_KEY;
+const VOICE_API_KEY = process.env.GROQ_VOICE_API_KEY || AI_API_KEY;
+const MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
+const ALLOWED_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "groq/compound", "groq/compound-mini"];
+// The gpt-oss/compound models are all text-only (per Groq's own model
+// metadata) — this is the one model in Groq's lineup that actually accepts
+// image input, so any message with an image attachment gets routed here
+// automatically instead of whatever text model was otherwise selected.
+const VISION_MODEL = "qwen/qwen3.8-27b";
+// "auto" (or anything unset/unrecognized) means no override — the model replies in whatever
+// language the user wrote in, which is its normal default behavior. Keys must
+// match client/src/App.jsx's LANGUAGE_OPTIONS.
+const LANGUAGE_NAMES = {
+  en: "English", fr: "French", es: "Spanish", rw: "Kinyarwanda", sw: "Swahili",
+  de: "German", it: "Italian", pt: "Portuguese", nl: "Dutch", ru: "Russian",
+  uk: "Ukrainian", pl: "Polish", tr: "Turkish", ar: "Arabic", he: "Hebrew",
+  fa: "Persian", hi: "Hindi", ur: "Urdu", bn: "Bengali", zh: "Chinese (Simplified)",
+  ja: "Japanese", ko: "Korean", vi: "Vietnamese", th: "Thai", id: "Indonesian",
+  ms: "Malay", tl: "Filipino", el: "Greek", sv: "Swedish", no: "Norwegian",
+  da: "Danish", fi: "Finnish", cs: "Czech", ro: "Romanian", hu: "Hungarian",
+  am: "Amharic", zu: "Zulu",
+};
 
-// In-memory conversation storage
-let memory = [];
+if (!AI_API_KEY) {
+  console.error("Missing GROQ_API_KEY. Set it in a .env file (get a free key at https://console.groq.com/keys).");
+  process.exit(1);
+}
+
+const USERNAME_RE = /^[a-zA-Z0-9_.-]{3,32}$/;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MIN_PASSWORD_LENGTH = 8;
+
+// groq/compound runs its own web searches and reports raw results in
+// executed_tools; pull out clean {title, url} citations for the client to show.
+function extractSources(executedTools) {
+  if (!Array.isArray(executedTools)) return [];
+  const seen = new Set();
+  const sources = [];
+  for (const tool of executedTools) {
+    if (typeof tool?.output !== "string") continue;
+    const re = /Title:\s*(.+?)\r?\nURL:\s*(\S+)/g;
+    let match;
+    while ((match = re.exec(tool.output)) !== null) {
+      const url = match[2].trim();
+      if (seen.has(url)) continue;
+      seen.add(url);
+      sources.push({ title: match[1].trim(), url });
+    }
+  }
+  return sources.slice(0, 6);
+}
+
+const MAX_ATTACHMENT_TEXT_CHARS = 8000;
+
+// Attachments arrive as {name, type, url} where url is a data: URI (same
+// shape the client already builds for its own preview). Pull real text out
+// of documents so the model actually has something to answer questions
+// about — before this, an attached file was invisible to the AI entirely.
+async function extractAttachmentText(att) {
+  const match = typeof att?.url === "string" && att.url.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) return null;
+
+  const mimeType = match[1];
+  const buffer = Buffer.from(match[2], "base64");
+  const name = (att.name || "").toLowerCase();
+
+  try {
+    if (name.endsWith(".pdf") || mimeType === "application/pdf") {
+      const parser = new PDFParse({ data: buffer });
+      try {
+        const { text } = await parser.getText();
+        return text;
+      } finally {
+        await parser.destroy();
+      }
+    }
+    if (name.endsWith(".docx")) {
+      const { value } = await mammoth.extractRawText({ buffer });
+      return value;
+    }
+    if (name.endsWith(".doc")) {
+      const doc = await new WordExtractor().extract(buffer);
+      return doc.getBody();
+    }
+    if (name.endsWith(".txt") || name.endsWith(".csv") || mimeType.startsWith("text/")) {
+      return buffer.toString("utf8");
+    }
+    return null; // unsupported format
+  } catch (error) {
+    console.error(`Could not extract text from attachment "${att.name}":`, error.message);
+    return null;
+  }
+}
+
+const TONE_TEXT = {
+  professional: "Keep your tone professional and businesslike.",
+  friendly: "Keep your tone especially warm, casual, and friendly, like a helpful friend.",
+  concise: "Keep answers as short and to the point as possible — brevity over completeness.",
+  witty: "Feel free to be a little witty and playful in your tone, while staying helpful.",
+};
+
+// Settings > Personalization — turns the user's saved preferences into system-prompt
+// instructions. "memoryEnabled" gates identity info (name/occupation/notes) only;
+// custom instructions and tone/trait preferences always apply, same as real ChatGPT.
+function buildPersonalizationPrompt(personalization) {
+  if (!personalization || typeof personalization !== "object") return "";
+  const parts = [];
+
+  if (TONE_TEXT[personalization.tone]) parts.push(TONE_TEXT[personalization.tone]);
+
+  const traits = personalization.traits || {};
+  if (traits.warmth === "more") parts.push("Be extra warm and encouraging.");
+  if (traits.warmth === "less") parts.push("Keep warmth minimal — stay neutral and matter-of-fact.");
+  if (traits.enthusiasm === "more") parts.push("Show more enthusiasm and energy in your replies.");
+  if (traits.enthusiasm === "less") parts.push("Keep enthusiasm low-key and measured.");
+  if (traits.formatting === "more") parts.push("Use headings and bullet lists more liberally to structure answers.");
+  if (traits.formatting === "less") parts.push("Avoid headings and bullet lists — prefer flowing prose.");
+  if (traits.emoji === "more") parts.push("Use emojis more often than your usual default.");
+  if (traits.emoji === "less") parts.push("Use little to no emoji.");
+
+  if (personalization.memoryEnabled !== false) {
+    if (personalization.nickname) parts.push(`Address the user as "${personalization.nickname}" when it's natural to do so.`);
+    if (personalization.occupation) parts.push(`The user's occupation/background: ${personalization.occupation}. Tailor examples and depth accordingly when relevant.`);
+    if (personalization.aboutMore) parts.push(`Other things to keep in mind about the user: ${personalization.aboutMore}`);
+  }
+
+  if (personalization.customInstructions) parts.push(`Additional user instructions: ${personalization.customInstructions}`);
+
+  return parts.length ? " " + parts.join(" ") : "";
+}
 
 /*
 |--------------------------------------------------------------------------
-| Health Route
+| Health Route (public)
 |--------------------------------------------------------------------------
 */
-app.get("/", (req, res) => {
+app.get("/api/health", (req, res) => {
   res.json({
     success: true,
     message: "Server is running",
@@ -33,12 +185,372 @@ app.get("/", (req, res) => {
 
 /*
 |--------------------------------------------------------------------------
-| Chat Route
+| Auth Routes
 |--------------------------------------------------------------------------
 */
-app.post("/chat", async (req, res) => {
+app.post("/api/auth/register", async (req, res) => {
+  try {
+    const { username, email, password } = req.body || {};
+
+    if (typeof username !== "string" || !USERNAME_RE.test(username)) {
+      return res.status(400).json({
+        success: false,
+        error: "Username must be 3-32 characters (letters, numbers, . _ -)",
+      });
+    }
+    if (typeof email !== "string" || !EMAIL_RE.test(email)) {
+      return res.status(400).json({ success: false, error: "Enter a valid email address" });
+    }
+    if (typeof password !== "string" || password.length < MIN_PASSWORD_LENGTH) {
+      return res.status(400).json({
+        success: false,
+        error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters`,
+      });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const [existing] = await pool.query(
+      "SELECT id, username, email FROM users WHERE username = ? OR email = ?",
+      [username, normalizedEmail]
+    );
+    if (existing.length > 0) {
+      const taken = existing[0].username === username ? "Username" : "Email";
+      return res.status(409).json({ success: false, error: `${taken} is already taken` });
+    }
+
+    const passwordHash = await hashPassword(password);
+    const [result] = await pool.query(
+      "INSERT INTO users (username, email, password_hash, display_name) VALUES (?, ?, ?, ?)",
+      [username, normalizedEmail, passwordHash, username]
+    );
+
+    const user = { id: result.insertId, username, email: normalizedEmail, displayName: username, advancedSecurityEnrolled: false, hasPassword: true, isAdmin: false };
+    const { jti, expiresIn } = await createSession(pool, user.id, req);
+    const token = signToken(user, jti, expiresIn);
+
+    return res.status(201).json({ success: true, token, user });
+  } catch (error) {
+    console.error("Register error:", error.message);
+    return res.status(500).json({ success: false, error: "Could not create account. Try again later." });
+  }
+});
+
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const { username, password } = req.body || {};
+
+    if (typeof username !== "string" || typeof password !== "string") {
+      return res.status(400).json({ success: false, error: "Username and password are required" });
+    }
+
+    const identifier = username.trim();
+    const [rows] = await pool.query(
+      "SELECT id, username, email, password_hash, display_name, advanced_security_enrolled, is_admin FROM users WHERE username = ? OR email = ?",
+      [identifier, identifier.toLowerCase()]
+    );
+    const row = rows[0];
+    const passwordOk = await verifyPassword(password, row?.password_hash);
+
+    if (!row || !passwordOk) {
+      return res.status(401).json({ success: false, error: "Invalid username/email or password" });
+    }
+    if (row.advanced_security_enrolled) {
+      return res.status(403).json({
+        success: false,
+        error: "Password sign-in is disabled for this account. Sign in with a passkey instead.",
+      });
+    }
+
+    const user = { id: row.id, username: row.username, email: row.email, displayName: row.display_name, advancedSecurityEnrolled: false, hasPassword: true, isAdmin: !!row.is_admin };
+    const { jti, expiresIn } = await createSession(pool, user.id, req);
+    const token = signToken(user, jti, expiresIn);
+
+    return res.json({ success: true, token, user });
+  } catch (error) {
+    console.error("Login error:", error.message);
+    return res.status(500).json({ success: false, error: "Could not sign in. Try again later." });
+  }
+});
+
+app.get("/api/auth/me", authenticate, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      "SELECT id, username, email, display_name, advanced_security_enrolled, password_hash, is_admin FROM users WHERE id = ?",
+      [req.user.id]
+    );
+    const row = rows[0];
+    if (!row) {
+      return res.status(401).json({ success: false, error: "User no longer exists" });
+    }
+    return res.json({
+      success: true,
+      user: {
+        id: row.id,
+        username: row.username,
+        email: row.email,
+        displayName: row.display_name,
+        advancedSecurityEnrolled: !!row.advanced_security_enrolled,
+        hasPassword: !!row.password_hash,
+        isAdmin: !!row.is_admin,
+      },
+    });
+  } catch (error) {
+    console.error("Session check error:", error.message);
+    return res.status(500).json({ success: false, error: "Could not load session" });
+  }
+});
+
+app.patch("/api/auth/username", authenticate, async (req, res) => {
+  try {
+    const { username } = req.body || {};
+    if (typeof username !== "string" || !USERNAME_RE.test(username)) {
+      return res.status(400).json({
+        success: false,
+        error: "Username must be 3-32 characters (letters, numbers, . _ -)",
+      });
+    }
+
+    const [existing] = await pool.query("SELECT id FROM users WHERE username = ? AND id != ?", [username, req.user.id]);
+    if (existing.length > 0) {
+      return res.status(409).json({ success: false, error: "That username is already taken" });
+    }
+
+    await pool.query("UPDATE users SET username = ? WHERE id = ?", [username, req.user.id]);
+    return res.json({ success: true, username });
+  } catch (error) {
+    console.error("Update username error:", error.message);
+    return res.status(500).json({ success: false, error: "Could not update username. Try again later." });
+  }
+});
+
+app.patch("/api/auth/display-name", authenticate, async (req, res) => {
+  try {
+    const { displayName } = req.body || {};
+    const trimmed = typeof displayName === "string" ? displayName.trim() : "";
+    if (!trimmed || trimmed.length > 120) {
+      return res.status(400).json({ success: false, error: "Enter a display name (up to 120 characters)" });
+    }
+
+    await pool.query("UPDATE users SET display_name = ? WHERE id = ?", [trimmed, req.user.id]);
+    return res.json({ success: true, displayName: trimmed });
+  } catch (error) {
+    console.error("Update display name error:", error.message);
+    return res.status(500).json({ success: false, error: "Could not update display name. Try again later." });
+  }
+});
+
+app.patch("/api/auth/email", authenticate, async (req, res) => {
+  try {
+    const { email, currentPassword } = req.body || {};
+    if (typeof email !== "string" || !EMAIL_RE.test(email)) {
+      return res.status(400).json({ success: false, error: "Enter a valid email address" });
+    }
+
+    const [rows] = await pool.query("SELECT password_hash FROM users WHERE id = ?", [req.user.id]);
+    const row = rows[0];
+    if (!row?.password_hash) {
+      return res.status(400).json({ success: false, error: "Add a password to your account before changing your email" });
+    }
+    if (typeof currentPassword !== "string" || !(await verifyPassword(currentPassword, row.password_hash))) {
+      return res.status(401).json({ success: false, error: "Current password is incorrect" });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const [existing] = await pool.query("SELECT id FROM users WHERE email = ? AND id != ?", [normalizedEmail, req.user.id]);
+    if (existing.length > 0) {
+      return res.status(409).json({ success: false, error: "That email is already in use" });
+    }
+
+    await pool.query("UPDATE users SET email = ? WHERE id = ?", [normalizedEmail, req.user.id]);
+    return res.json({ success: true, email: normalizedEmail });
+  } catch (error) {
+    console.error("Update email error:", error.message);
+    return res.status(500).json({ success: false, error: "Could not update email. Try again later." });
+  }
+});
+
+app.delete("/api/auth/account", authenticate, async (req, res) => {
+  try {
+    const { password } = req.body || {};
+    const [rows] = await pool.query("SELECT password_hash FROM users WHERE id = ?", [req.user.id]);
+    const row = rows[0];
+    if (!row) {
+      return res.status(401).json({ success: false, error: "User no longer exists" });
+    }
+    if (row.password_hash) {
+      if (typeof password !== "string" || !(await verifyPassword(password, row.password_hash))) {
+        return res.status(401).json({ success: false, error: "Password is incorrect" });
+      }
+    }
+
+    await pool.query("DELETE FROM users WHERE id = ?", [req.user.id]);
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("Delete account error:", error.message);
+    return res.status(500).json({ success: false, error: "Could not delete account. Try again later." });
+  }
+});
+
+app.post("/api/auth/change-password", authenticate, async (req, res) => {
+  try {
+    const { currentPassword, newPassword, notifyEmail } = req.body || {};
+
+    if (typeof currentPassword !== "string" || typeof newPassword !== "string") {
+      return res.status(400).json({ success: false, error: "Current and new password are required" });
+    }
+    if (newPassword.length < MIN_PASSWORD_LENGTH) {
+      return res.status(400).json({
+        success: false,
+        error: `New password must be at least ${MIN_PASSWORD_LENGTH} characters`,
+      });
+    }
+
+    const [rows] = await pool.query("SELECT password_hash, email FROM users WHERE id = ?", [req.user.id]);
+    const row = rows[0];
+    const currentOk = row && (await verifyPassword(currentPassword, row.password_hash));
+    if (!currentOk) {
+      return res.status(401).json({ success: false, error: "Current password is incorrect" });
+    }
+
+    const newHash = await hashPassword(newPassword);
+    await pool.query("UPDATE users SET password_hash = ? WHERE id = ?", [newHash, req.user.id]);
+
+    // Fire-and-forget: a delivery failure shouldn't fail a password change that already succeeded.
+    if (notifyEmail === true && isEmailConfigured && row.email) {
+      sendPasswordChangedEmail(row.email).catch((err) => {
+        console.error("Failed to send password-changed email:", err.message);
+      });
+    }
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("Change password error:", error.message);
+    return res.status(500).json({ success: false, error: "Could not update password. Try again later." });
+  }
+});
+
+// For accounts created via Google/Microsoft/Apple that have no password
+// yet — unlike /change-password, there's no current password to verify.
+app.post("/api/auth/add-password", authenticate, async (req, res) => {
+  try {
+    const { newPassword } = req.body || {};
+    if (typeof newPassword !== "string" || newPassword.length < MIN_PASSWORD_LENGTH) {
+      return res.status(400).json({
+        success: false,
+        error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters`,
+      });
+    }
+
+    const [rows] = await pool.query("SELECT password_hash FROM users WHERE id = ?", [req.user.id]);
+    const row = rows[0];
+    if (row?.password_hash) {
+      return res.status(400).json({ success: false, error: "This account already has a password. Use Change Password instead." });
+    }
+
+    const newHash = await hashPassword(newPassword);
+    await pool.query("UPDATE users SET password_hash = ? WHERE id = ?", [newHash, req.user.id]);
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("Add password error:", error.message);
+    return res.status(500).json({ success: false, error: "Could not add a password. Try again later." });
+  }
+});
+
+const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
+const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
+
+app.post("/api/auth/forgot-password", async (req, res) => {
+  try {
+    const { email } = req.body || {};
+    if (typeof email !== "string" || !EMAIL_RE.test(email)) {
+      return res.status(400).json({ success: false, error: "Enter a valid email address" });
+    }
+    if (!isEmailConfigured) {
+      return res.status(503).json({ success: false, error: "Password reset emails are not configured on this server yet" });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const [rows] = await pool.query("SELECT id, advanced_security_enrolled FROM users WHERE email = ?", [normalizedEmail]);
+
+    // Always respond the same way whether or not the account exists (or has
+    // email recovery disabled via Advanced Account Security), so this
+    // endpoint can't be used to discover which emails have accounts.
+    if (rows.length && !rows[0].advanced_security_enrolled) {
+      const rawToken = crypto.randomBytes(32).toString("hex");
+      const tokenHash = crypto.createHash("sha256").update(rawToken).digest("hex");
+      const expires = new Date(Date.now() + RESET_TOKEN_TTL_MS);
+      await pool.query(
+        "UPDATE users SET reset_token_hash = ?, reset_token_expires = ? WHERE id = ?",
+        [tokenHash, expires, rows[0].id]
+      );
+
+      const resetUrl = `${CLIENT_URL}/#reset_token=${rawToken}`;
+      sendPasswordResetEmail(normalizedEmail, resetUrl).catch((err) => {
+        console.error("Failed to send password reset email:", err.message);
+      });
+    }
+
+    return res.json({ success: true, message: "If that email has an account, a reset link has been sent." });
+  } catch (error) {
+    console.error("Forgot password error:", error.message);
+    return res.status(500).json({ success: false, error: "Could not process request. Try again later." });
+  }
+});
+
+app.post("/api/auth/reset-password", async (req, res) => {
+  try {
+    const { token, newPassword } = req.body || {};
+    if (typeof token !== "string" || typeof newPassword !== "string") {
+      return res.status(400).json({ success: false, error: "Reset token and new password are required" });
+    }
+    if (newPassword.length < MIN_PASSWORD_LENGTH) {
+      return res.status(400).json({ success: false, error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters` });
+    }
+
+    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+    const [rows] = await pool.query(
+      "SELECT id FROM users WHERE reset_token_hash = ? AND reset_token_expires > NOW()",
+      [tokenHash]
+    );
+    if (!rows.length) {
+      return res.status(400).json({ success: false, error: "This reset link is invalid or has expired. Request a new one." });
+    }
+
+    const newHash = await hashPassword(newPassword);
+    await pool.query(
+      "UPDATE users SET password_hash = ?, reset_token_hash = NULL, reset_token_expires = NULL WHERE id = ?",
+      [newHash, rows[0].id]
+    );
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("Reset password error:", error.message);
+    return res.status(500).json({ success: false, error: "Could not reset password. Try again later." });
+  }
+});
+
+registerOAuthRoutes(app, { signToken, createSession });
+registerWebauthnRoutes(app, { pool, authenticate, signToken, createSession });
+registerSessionRoutes(app, { pool, authenticate });
+registerAdvancedSecurityRoutes(app, { pool, authenticate });
+registerFamilyRoutes(app, { pool, authenticate });
+registerAdminRoutes(app, { pool, authenticate, isEmailConfigured, model: MODEL, allowedModels: ALLOWED_MODELS });
+
+/*
+|--------------------------------------------------------------------------
+| Chat Route (requires a valid session)
+|--------------------------------------------------------------------------
+*/
+app.post("/api/chat", authenticate, async (req, res) => {
   try {
     const userMessage = req.body.message;
+    const temperature = typeof req.body.temperature === "number" ? req.body.temperature : 0.7;
+    const requestedModel = ALLOWED_MODELS.includes(req.body.model) ? req.body.model : MODEL;
+    const deepResearch = req.body.deepResearch === true;
+    const replyLanguage = LANGUAGE_NAMES[req.body.language];
+    const personalizationPrompt = buildPersonalizationPrompt(req.body.personalization);
 
     // Validate input
     if (!userMessage || typeof userMessage !== "string") {
@@ -48,76 +560,144 @@ app.post("/chat", async (req, res) => {
       });
     }
 
-    // Save user message
-    memory.push({
-      role: "user",
-      content: userMessage,
-    });
+    // Attachments used to be a client-only preview — the AI never actually
+    // saw them. Images need a vision-capable model (none of the gpt-oss /
+    // compound models accept image input), so any image attachment forces a
+    // switch to one regardless of what was otherwise selected. Document text
+    // gets extracted and folded straight into the message.
+    const attachments = Array.isArray(req.body.attachments) ? req.body.attachments : [];
+    const imageAttachments = attachments.filter(a => a?.type === "image" && typeof a?.url === "string");
+    const fileAttachments = attachments.filter(a => a?.type === "file" && typeof a?.url === "string");
 
-    // Keep only recent messages
-    memory = memory.slice(-10);
+    const requestedModelForCompletion = imageAttachments.length > 0 ? VISION_MODEL : requestedModel;
+
+    // "Higher intelligence" (the Brain toggle) used to just re-select
+    // openai/gpt-oss-120b — which is already the default model everyone
+    // gets, so it silently did nothing for most users. The GPT-OSS models
+    // actually support a reasoning_effort dial; that's the real lever for
+    // visibly smarter (if slower) answers, so wire the toggle to that instead.
+    const smartMode = req.body.smart === true;
+    const supportsReasoningEffort = requestedModelForCompletion.startsWith("openai/gpt-oss");
+
+    let messageText = userMessage;
+    if (fileAttachments.length > 0) {
+      const extracted = await Promise.all(fileAttachments.map(async (att) => {
+        const text = await extractAttachmentText(att);
+        return text
+          ? `\n\n[Attached file "${att.name}"]\n${text.slice(0, MAX_ATTACHMENT_TEXT_CHARS)}`
+          : `\n\n[Attached file "${att.name}" — couldn't read this file format.]`;
+      }));
+      messageText += extracted.join("");
+    }
+    const userContent = imageAttachments.length > 0
+      ? [
+          { type: "text", text: messageText },
+          ...imageAttachments.map(a => ({ type: "image_url", image_url: { url: a.url } })),
+        ]
+      : messageText;
+
+    // Conversation history lives on the client, scoped to the specific chat
+    // it belongs to (each chat thread keeps its own ordered message list from
+    // the moment it started). It's sent with every request instead of kept in
+    // server memory, so replies never leak context between unrelated chats,
+    // survive a server restart, and stay correct across devices/sessions.
+    const clientHistory = Array.isArray(req.body.history) ? req.body.history : [];
+    const sanitizedHistory = clientHistory
+      .filter(m => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string" && m.content.trim())
+      .map(m => ({ role: m.role, content: m.content.slice(0, 4000) }));
+    const trimmed = [...sanitizedHistory.slice(-19), { role: "user", content: userContent }];
 
     // Build conversation
     const messages = [
       {
         role: "system",
-        content: "You are a helpful AI assistant.",
+        content:
+          "You are FigoAI, a warm, professional AI assistant with a consistently polished, high-quality voice. Answer exactly what the user asked, leading with the direct answer, then add one or two sentences of useful context or explanation (the key 'why' or 'how') — not a full essay, and no unrequested caveats or tangents. Only go deeper — alternatives, step-by-step reasoning, longer background — if the user explicitly asks for more detail. Stay composed and put-together in every reply — friendly and approachable, never sloppy or overly casual. " +
+          "Be truthful above all: if a name, acronym, or term could refer to more than one distinct real-world thing (e.g. an abbreviation shared by unrelated organizations in different countries), don't silently pick one and ignore the rest — briefly cover each distinct thing it commonly refers to, so the user gets the full picture instead of a guess. Get official names exactly right rather than guessing a similar-sounding variant (e.g. 'Agency' vs 'Authority' vs 'Bureau' are not interchangeable) — for example, Rwanda's national broadcaster is the Rwanda Broadcasting Agency (RBA), not 'Rwanda Broadcasting Authority'. If you're not confident about a fact, a lesser-known entity, or anything that may have changed after your training, say so plainly instead of presenting a guess as certain — never invent details to sound authoritative. " +
+          "When a specific real resource would genuinely help — an official site, documentation, a product page, a source you found via web search — weave it in inline as a markdown link, e.g. [its name](https://example.com), right where you mention it, rather than dumping bare URLs. Only ever link to a URL you actually know or found via search; never invent, guess, or complete a plausible-looking one. Skip links entirely when nothing concrete and real is worth pointing to. " +
+          "Emojis are fine used sparingly to add a little warmth (e.g. one fitting emoji next to a greeting or a key point) — never more than that, and never in code blocks, technical explanations, or formal answers, where they read as unprofessional. Format responses with markdown (headings, bold, lists, code blocks) only when it improves readability. " +
+          "Default to natural prose: short paragraphs, **bold** on key terms, and bullet or numbered lists when something is genuinely a list of items or steps — the way a knowledgeable person would explain it conversationally, not a report. Reach for a markdown table only when the content is truly tabular (e.g. comparing several items across the same set of attributes side by side); never use a table to structure a single description, a self-introduction, or an open-ended explanation. " +
+          "You can show a real generated photo alongside your reply to add contextual visual value. Use this only when it's genuinely necessary — the user explicitly asked for a picture/photo/image of something, or a visual would make a concrete, visualizable thing (a place, an object, an animal, a scene, a design) far clearer than words alone. Don't use it for abstract, conversational, or purely informational questions. When you do want to show one, end your entire reply with a final line in exactly this format, with nothing after it: [IMAGE: a short, vivid, English description of exactly what the photo should show] " +
+          "When you write code, always wrap it in a fenced code block tagged with its language (e.g. ```python, ```javascript) — never leave a code block untagged. Write clean, idiomatic, working code: sensible names, correct edge-case handling, and the standard formatting conventions for that language. Add a comment only where the logic genuinely isn't obvious from reading it — don't narrate every line, and don't pad the answer with unrequested tests, alternatives, or explanation unless asked." +
+          "If a user message contains a block like [Attached file \"name\"] followed by text, that text is the real, verbatim extracted content of a file they actually uploaded — not something they typed or that you're guessing at. Treat it as ground truth and answer directly from it; don't hedge about being unable to view the file or unsure where the information came from. If that block instead says the file couldn't be read, say so plainly rather than guessing at its contents. Photos attached directly to the message (not as an extracted-text block) are visible to you as real images — describe or answer questions about them directly, the same way." +
+          (deepResearch
+            ? " The user turned on Deep Research: this overrides your usual brevity rule. Run multiple searches to cover the topic from several angles, then write a genuinely thorough report — background/context, the current state of the topic, key facts with their sources, differing perspectives where they exist, and a short synthesis at the end. Organize it with headings and don't pad it — every section should carry real information, not restate the question."
+            : "") +
+          (replyLanguage ? ` Always reply in ${replyLanguage}, regardless of what language the user writes in.` : "") +
+          personalizationPrompt,
       },
-      ...memory,
+      ...trimmed,
     ];
 
-    console.log("Sending request to Ollama...");
+    console.log("Sending request to Groq...");
 
-    // Call Ollama
+    // Call Groq
     const response = await axios.post(
-      OLLAMA_URL,
+      AI_URL,
       {
-        model: MODEL,
+        model: requestedModelForCompletion,
         messages: messages,
+        temperature,
         stream: false,
+        ...(supportsReasoningEffort ? { reasoning_effort: smartMode ? "high" : "medium" } : {}),
       },
       {
-        timeout: 60000,
+        headers: {
+          Authorization: `Bearer ${requestedModelForCompletion.startsWith("groq/compound") ? SEARCH_API_KEY : AI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        timeout: deepResearch ? 120000 : 60000,
       }
     );
 
-    // Validate Ollama response
-    if (
-      !response.data ||
-      !response.data.message ||
-      !response.data.message.content
-    ) {
+    const responseMessage = response.data?.choices?.[0]?.message;
+    const assistantReply = responseMessage?.content;
+
+    if (!assistantReply) {
       return res.status(500).json({
         success: false,
-        error: "Invalid response from Ollama",
+        error: "Invalid response from Groq",
       });
     }
 
-    const assistantReply = response.data.message.content;
+    const sources = extractSources(responseMessage?.executed_tools);
 
-    // Save assistant reply
-    memory.push({
-      role: "assistant",
-      content: assistantReply,
-    });
+    // The model signals a photo is warranted with a trailing [IMAGE: ...] line
+    // (see system prompt). Pollinations turns a text prompt straight into an
+    // image URL — no generation call or API key needed on our side, the
+    // browser triggers the actual render when it loads the <img>.
+    const imageMatch = assistantReply.match(/\[IMAGE:\s*([^\]]+)\]\s*$/i);
+    const imagePrompt = imageMatch ? imageMatch[1].trim() : null;
+    const cleanReply = imagePrompt ? assistantReply.slice(0, imageMatch.index).trim() : assistantReply;
+    const images = imagePrompt
+      ? [{
+          // Pollinations' seed is expected to fit a normal int range — a raw
+          // Date.now() timestamp (13 digits) overflows that and makes the
+          // image request hang or 500, so keep it random but small instead.
+          url: `https://image.pollinations.ai/prompt/${encodeURIComponent(`${imagePrompt}, high quality, detailed`)}?width=768&height=768&nologo=true&seed=${Math.floor(Math.random() * 1e9)}`,
+          prompt: imagePrompt,
+        }]
+      : [];
 
     console.log("Response generated successfully");
 
     return res.json({
       success: true,
-      reply: assistantReply,
+      reply: cleanReply,
+      model: requestedModelForCompletion,
+      sources,
+      images,
     });
 
   } catch (error) {
     console.error("SERVER ERROR:");
     console.error(error.message);
 
-    // Axios / Ollama connection errors
-    if (error.code === "ECONNREFUSED") {
+    // Axios / Groq connection errors
+    if (error.code === "ECONNREFUSED" || error.code === "ENOTFOUND") {
       return res.status(500).json({
         success: false,
-        error:
-          "Cannot connect to Ollama. Make sure 'ollama serve' is running.",
+        error: "Cannot connect to Groq. Check your network connection.",
       });
     }
 
@@ -125,17 +705,27 @@ app.post("/chat", async (req, res) => {
     if (error.code === "ECONNABORTED") {
       return res.status(500).json({
         success: false,
-        error: "Ollama request timed out",
+        error: "Groq request timed out",
       });
     }
 
-    // Ollama returned 4xx/5xx with a body (e.g. out of memory, model not found)
-    const ollamaError = error.response?.data?.error;
-    if (ollamaError) {
-      console.error("Ollama:", ollamaError);
+    // groq/compound's free-tier token budget is small and shared across all
+    // compound calls — surface this clearly instead of a cryptic 413/429.
+    const providerCode = error.response?.data?.error?.code;
+    if (error.response?.status === 429 || providerCode === "rate_limit_exceeded" || providerCode === "request_too_large") {
+      return res.status(429).json({
+        success: false,
+        error: "Web search is rate-limited on Groq's free tier right now. Wait a moment and try again, or switch to a non-search model in Settings.",
+      });
+    }
+
+    // Groq returned 4xx/5xx with a body (e.g. bad key, rate limit)
+    const providerError = error.response?.data?.error?.message || error.response?.data?.error;
+    if (providerError) {
+      console.error("Groq:", providerError);
       return res.status(500).json({
         success: false,
-        error: ollamaError,
+        error: providerError,
       });
     }
 
@@ -149,11 +739,190 @@ app.post("/chat", async (req, res) => {
 
 /*
 |--------------------------------------------------------------------------
+| Chat Title Route — short auto-generated conversation name, ChatGPT-style
+|--------------------------------------------------------------------------
+*/
+app.post("/api/chat/title", authenticate, async (req, res) => {
+  try {
+    const { message, reply } = req.body || {};
+    if (typeof message !== "string" || !message.trim()) {
+      return res.status(400).json({ success: false, error: "Request body must contain a message string" });
+    }
+
+    const response = await axios.post(
+      AI_URL,
+      {
+        // Small/fast model — this is a cheap one-line summary, not a real answer.
+        model: "openai/gpt-oss-20b",
+        messages: [
+          {
+            role: "system",
+            content:
+              "Write a short title (3-6 words) that names what this conversation is about, the way a chat app names a conversation in its sidebar. Sound natural and specific, like a person titling their own conversation — never a clinical label. Avoid generic meta-words like 'exchange', 'conversation', 'chat', 'discussion', or 'inquiry'. For plain small talk or a greeting with no real topic yet, title it after what was actually said (e.g. 'Just Saying Hi', 'Hello There') rather than describing it abstractly. No quotes, no trailing punctuation, no emoji, no prefix like 'Title:'. Reply with only the title.",
+          },
+          {
+            role: "user",
+            content: `User: ${message.slice(0, 500)}${typeof reply === "string" ? `\nAssistant: ${reply.slice(0, 300)}` : ""}`,
+          },
+        ],
+        temperature: 0.3,
+        max_tokens: 150,
+        reasoning_effort: "low",
+        stream: false,
+      },
+      {
+        headers: { Authorization: `Bearer ${AI_API_KEY}`, "Content-Type": "application/json" },
+        timeout: 15000,
+      }
+    );
+
+    let title = response.data?.choices?.[0]?.message?.content?.trim() || "";
+    title = title.replace(/^["'“”]+|["'“”]+$/g, "").replace(/[.!?]+$/, "").trim().slice(0, 60);
+
+    if (!title) {
+      return res.status(500).json({ success: false, error: "Could not generate a title" });
+    }
+
+    return res.json({ success: true, title });
+  } catch (error) {
+    console.error("Title generation error:", error.message);
+    return res.status(500).json({ success: false, error: "Could not generate a title" });
+  }
+});
+
+/*
+|--------------------------------------------------------------------------
+| Voice Transcription Route — server-side speech-to-text via Groq Whisper
+|--------------------------------------------------------------------------
+| The browser's own SpeechRecognition API (used for dictation) only works in
+| Chrome-family browsers and is flaky on mobile Safari. This gives every
+| browser a reliable fallback: record audio client-side, ship it here as
+| base64, transcribe it with Whisper.
+*/
+const MAX_VOICE_BYTES = 20 * 1024 * 1024; // Whisper's own cap is 25MB; leave headroom
+
+app.post("/api/voice/transcribe", authenticate, async (req, res) => {
+  try {
+    const { audio, mimeType } = req.body || {};
+    if (typeof audio !== "string" || !audio) {
+      return res.status(400).json({ success: false, error: "Request body must contain base64 audio data" });
+    }
+
+    let buffer;
+    try {
+      buffer = Buffer.from(audio, "base64");
+    } catch {
+      return res.status(400).json({ success: false, error: "Invalid base64 audio data" });
+    }
+    if (buffer.length === 0) {
+      return res.status(400).json({ success: false, error: "Empty audio data" });
+    }
+    if (buffer.length > MAX_VOICE_BYTES) {
+      return res.status(413).json({ success: false, error: "That recording is too long to transcribe" });
+    }
+
+    const form = new FormData();
+    form.append("file", new Blob([buffer], { type: mimeType || "audio/webm" }), "audio.webm");
+    form.append("model", "whisper-large-v3");
+    form.append("response_format", "json");
+
+    const groqRes = await fetch(VOICE_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${VOICE_API_KEY}` },
+      body: form,
+      signal: AbortSignal.timeout(30000),
+    });
+
+    if (!groqRes.ok) {
+      const errBody = await groqRes.text().catch(() => "");
+      console.error("Groq voice transcription error:", groqRes.status, errBody);
+      return res.status(500).json({ success: false, error: "Could not transcribe that audio" });
+    }
+
+    const data = await groqRes.json();
+    const text = data?.text?.trim();
+    if (!text) {
+      return res.status(422).json({ success: false, error: "Didn't catch any speech in that recording" });
+    }
+
+    return res.json({ success: true, text });
+  } catch (error) {
+    console.error("Voice transcription error:", error.message);
+    return res.status(500).json({ success: false, error: "Could not transcribe that audio" });
+  }
+});
+
+/*
+|--------------------------------------------------------------------------
+| Serve the built frontend (production)
+|--------------------------------------------------------------------------
+| `npm run dev` runs the Vite dev server separately on :5173 with its own
+| proxy for /api, so this block is a no-op locally unless you've actually
+| built the client. In production there's only this one server: build the
+| client first (`npm --prefix client run build`), then everything — API and
+| static assets — is served from the same origin and port.
+*/
+const clientDist = path.join(__dirname, "client", "dist");
+if (fs.existsSync(clientDist)) {
+  app.use(express.static(clientDist));
+  // Anything that isn't an API route is a client-side path (React Router) —
+  // hand it index.html and let the SPA's own router figure out what to show.
+  app.get(/^(?!\/api\/).*/, (req, res) => {
+    res.sendFile(path.join(clientDist, "index.html"));
+  });
+} else {
+  console.log("No client/dist found — this server will only answer /api/* requests.");
+  console.log("Run `npm run build` (or `npm --prefix client run build`) to also serve the frontend from here.");
+}
+
+/*
+|--------------------------------------------------------------------------
 | Start Server
 |--------------------------------------------------------------------------
 */
-app.listen(PORT, () => {
-  console.log(`Server running at: http://localhost:${PORT}`);
-  console.log(`Using model: ${MODEL}`);
-  console.log("Ready for requests...");
-});
+async function start() {
+  try {
+    await initDb();
+    console.log("Database ready");
+  } catch (error) {
+    console.error("Could not initialize the database:", error.message);
+    console.error("Auth endpoints will return errors until the database is reachable (check DB_HOST/DB_USER/DB_PASSWORD/DB_NAME).");
+  }
+
+  const server = app.listen(PORT, () => {
+    console.log(`Server running at: http://localhost:${PORT}`);
+    console.log(`Using model: ${MODEL}`);
+    console.log("Ready for requests...");
+  });
+
+  // Without this, a failed bind (e.g. a previous instance still holding the
+  // port) is an unhandled 'error' event — Node treats that as a crash and
+  // dumps a raw stack trace. Handle it explicitly so it's a clear message
+  // and a clean exit instead.
+  server.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(`\nPort ${PORT} is already in use — another FigoAI server is still running.`);
+      console.error("Stop that instance first (Ctrl+C in its terminal, or close the window it's running in), then start this one again.\n");
+    } else {
+      console.error("Server failed to start:", err.message);
+    }
+    process.exit(1);
+  });
+
+  // Closing a terminal or hitting Ctrl+C without this just kills the process
+  // outright, which can leave the port in a state Windows is slow to release —
+  // the exact scenario that produces EADDRINUSE on the very next start. Closing
+  // the server first lets the OS free the port immediately.
+  const shutdown = (signal) => {
+    console.log(`\nReceived ${signal}, shutting down...`);
+    server.close(() => {
+      console.log("Server closed.");
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(1), 5000).unref();
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+}
+
+start();

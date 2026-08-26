@@ -1,0 +1,103 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# Not deployed yet. When you're ready: push this repo to GitHub, then in the
+# Render dashboard choose "New +" -> "Blueprint" and point it at the repo.
+# Render reads this file and provisions both resources below automatically.
+#
+# After the first deploy, a few env vars still need filling in by hand in the
+# Render dashboard (marked `sync: false` below) — see the checklist at the
+# bottom of this file.
+
+databases:
+  - name: figoai-postgres
+    databaseName: figoai
+    plan: free
+    postgresMajorVersion: "16"
+
+services:
+  - type: web
+    name: figoai
+    runtime: node
+    plan: free
+    region: oregon
+    branch: main
+    buildCommand: npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-120b
+      # Optional — separate keys so groq/compound search and Whisper voice
+      # transcription don't compete with normal chat traffic. Each falls back
+      # to GROQ_API_KEY if left blank.
+      - key: GROQ_SEARCH_API_KEY
+        sync: false
+      - key: GROQ_VOICE_API_KEY
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      - key: ADMIN_USERNAME
+        value: figobiziman
+      - key: DB_HOST
+        fromDatabase:
+          name: figoai-postgres
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: figoai-postgres
+          property: port
+      - key: DB_USER
+        fromDatabase:
+          name: figoai-postgres
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: figoai-postgres
+          property: password
+      - key: DB_NAME
+        fromDatabase:
+          name: figoai-postgres
+          property: database
+      # Render assigns the public URL only after the first deploy, so these
+      # two can't be templated here — set both to that same URL by hand
+      # (Settings -> Environment), e.g. https://figoai.onrender.com for both.
+      - key: CLIENT_URL
+        sync: false
+      - key: SERVER_URL
+        sync: false
+      # Optional — leave blank to keep Google/GitHub sign-in disabled.
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      # Optional — leave blank to keep password-reset emails disabled.
+      - key: EMAIL_USER
+        sync: false
+      - key: EMAIL_APP_PASSWORD
+        sync: false
+
+# --- Before you flip this live ---------------------------------------------
+# 1. Push this repo to GitHub (Render deploys from a git remote, not a local
+#    folder).
+# 2. Render dashboard -> New -> Blueprint -> select the repo -> it reads this
+#    file and creates the "figoai-postgres" database and "figoai" web service.
+# 3. First deploy will fail health checks until you fill in the `sync: false`
+#    vars above (GROQ_API_KEY at minimum). Do that under the service's
+#    Environment tab, then trigger a manual deploy.
+# 4. Once the service has a URL, set CLIENT_URL and SERVER_URL to it (both
+#    the same value) and redeploy — this fixes OAuth redirects and passkey
+#    (WebAuthn) origin checks, which read CLIENT_URL directly.
+# 5. If you want Google/GitHub sign-in or password-reset emails live, fill in
+#    their env vars too (see .env.example for where each value comes from).
+# 6. Free plan notes: the web service spins down after 15 min idle (first
+#    request after that is slow to wake it), and the free Postgres database
+#    is deleted after 90 days unless upgraded — fine for testing, not for a
+#    real launch.
