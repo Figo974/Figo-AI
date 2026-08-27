@@ -341,18 +341,22 @@ export async function generateChatTitle(message, reply) {
   return data.title;
 }
 
-export async function transcribeVoice(base64Audio, mimeType) {
+// `language` is an optional ISO-639-1 hint (see App.jsx's low-confidence
+// fallback) — omit it to let Whisper freely auto-detect. Returns the
+// transcript plus what Whisper actually detected and how confident it was,
+// so the caller can decide whether to keep trusting auto-detect.
+export async function transcribeVoice(base64Audio, mimeType, language) {
   const res = await fetch(`${API_BASE}/voice/transcribe`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${getToken()}`,
     },
-    body: JSON.stringify({ audio: base64Audio, mimeType }),
+    body: JSON.stringify({ audio: base64Audio, mimeType, language }),
   });
   if (!res.ok) throw await parseError(res, 'Could not transcribe that audio');
   const data = await res.json();
-  return data.text;
+  return { text: data.text, language: data.language, confidence: data.confidence };
 }
 
 function adminGet(path, fallback) {

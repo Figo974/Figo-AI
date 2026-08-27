@@ -60,6 +60,17 @@ const LANGUAGE_NAMES = {
   ms: "Malay", tl: "Filipino", el: "Greek", sv: "Swedish", no: "Norwegian",
   da: "Danish", fi: "Finnish", cs: "Czech", ro: "Romanian", hu: "Hungarian",
   am: "Amharic", zu: "Zulu",
+  af: "Afrikaans", sq: "Albanian", hy: "Armenian", az: "Azerbaijani", eu: "Basque",
+  be: "Belarusian", bs: "Bosnian", bg: "Bulgarian", ca: "Catalan", hr: "Croatian",
+  et: "Estonian", gl: "Galician", ka: "Georgian", is: "Icelandic", lv: "Latvian",
+  lt: "Lithuanian", lb: "Luxembourgish", mk: "Macedonian", mt: "Maltese", sr: "Serbian",
+  sk: "Slovak", sl: "Slovenian", cy: "Welsh", yi: "Yiddish",
+  gu: "Gujarati", kn: "Kannada", ml: "Malayalam", mr: "Marathi", ne: "Nepali",
+  pa: "Punjabi", ps: "Pashto", sd: "Sindhi", si: "Sinhala", ta: "Tamil", te: "Telugu",
+  bo: "Tibetan", my: "Burmese", km: "Khmer", lo: "Lao", jw: "Javanese", su: "Sundanese",
+  kk: "Kazakh", mn: "Mongolian", tg: "Tajik", tk: "Turkmen", uz: "Uzbek",
+  ha: "Hausa", so: "Somali", sn: "Shona", yo: "Yoruba", mg: "Malagasy", mi: "Maori",
+  ht: "Haitian Creole",
 };
 
 if (!AI_API_KEY) {
@@ -795,15 +806,32 @@ app.post("/api/chat/title", authenticate, async (req, res) => {
 | Voice Transcription Route — server-side speech-to-text via Groq Whisper
 |--------------------------------------------------------------------------
 | The browser's own SpeechRecognition API (used for dictation) only works in
-| Chrome-family browsers and is flaky on mobile Safari. This gives every
-| browser a reliable fallback: record audio client-side, ship it here as
-| base64, transcribe it with Whisper.
+| Chrome-family browsers, is flaky on mobile Safari, and only ever listens
+| for one fixed language per session. This gives every browser a reliable,
+| language-agnostic fallback: record audio client-side, ship it here as
+| base64, transcribe it with Whisper (auto language detection, ~99
+| languages) instead of a single hardcoded locale.
 */
 const MAX_VOICE_BYTES = 20 * 1024 * 1024; // Whisper's own cap is 25MB; leave headroom
 
+// Rough 0-1 confidence estimate from Whisper's verbose_json segments. There's
+// no official "confidence" field, so this leans on the two signals Whisper
+// does expose: avg_logprob (near 0 = confident, very negative = uncertain)
+// and no_speech_prob (high = the model thinks it heard silence/noise, so its
+// language guess for that stretch shouldn't be trusted). Segments with a high
+// no_speech_prob are excluded rather than dragging the average down, since a
+// silent segment isn't evidence of a *wrong* language guess.
+function estimateConfidence(segments) {
+  if (!Array.isArray(segments) || !segments.length) return 1;
+  const voiced = segments.filter(s => typeof s.avg_logprob === "number" && (s.no_speech_prob ?? 0) < 0.5);
+  if (!voiced.length) return 0;
+  const avgLogprob = voiced.reduce((sum, s) => sum + s.avg_logprob, 0) / voiced.length;
+  return Math.max(0, Math.min(1, Math.exp(avgLogprob)));
+}
+
 app.post("/api/voice/transcribe", authenticate, async (req, res) => {
   try {
-    const { audio, mimeType } = req.body || {};
+    const { audio, mimeType, language } = req.body || {};
     if (typeof audio !== "string" || !audio) {
       return res.status(400).json({ success: false, error: "Request body must contain base64 audio data" });
     }
@@ -824,7 +852,15 @@ app.post("/api/voice/transcribe", authenticate, async (req, res) => {
     const form = new FormData();
     form.append("file", new Blob([buffer], { type: mimeType || "audio/webm" }), "audio.webm");
     form.append("model", "whisper-large-v3");
-    form.append("response_format", "json");
+    form.append("response_format", "verbose_json");
+    // Omitting `language` lets Whisper auto-detect from the audio itself —
+    // that's the default so users can speak any of its ~99 supported
+    // languages without picking one first. A hint is only sent when the
+    // caller passes one (see the client's low-confidence fallback), which
+    // biases decoding toward that locale instead of forcing it.
+    if (typeof language === "string" && language && language !== "auto" && LANGUAGE_NAMES[language]) {
+      form.append("language", language);
+    }
 
     const groqRes = await fetch(VOICE_URL, {
       method: "POST",
@@ -845,7 +881,12 @@ app.post("/api/voice/transcribe", authenticate, async (req, res) => {
       return res.status(422).json({ success: false, error: "Didn't catch any speech in that recording" });
     }
 
-    return res.json({ success: true, text });
+    return res.json({
+      success: true,
+      text,
+      language: data?.language || null,
+      confidence: estimateConfidence(data?.segments),
+    });
   } catch (error) {
     console.error("Voice transcription error:", error.message);
     return res.status(500).json({ success: false, error: "Could not transcribe that audio" });

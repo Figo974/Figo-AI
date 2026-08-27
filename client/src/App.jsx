@@ -1113,7 +1113,7 @@ function SettingsPanel({ settings, onUpdate, onClose, user, onUpdateUser, onClea
                 </div>
                 <div className="settings-section">
                   <h3>Voice input</h3>
-                  <p>Tap the microphone in the message box to dictate instead of typing. This uses your browser's built-in speech recognition — available in Chrome and Edge, and needs microphone permission the first time you use it.</p>
+                  <p>Tap the microphone in the message box to dictate instead of typing — needs microphone permission the first time you use it. With Language set to "Auto-detect" above, it recognizes whatever language you speak automatically, in any browser; pinning a specific language instead uses your browser's faster built-in speech recognition where available (Chrome and Edge).</p>
                 </div>
               </>
             )}
@@ -2138,7 +2138,104 @@ const LANGUAGE_OPTIONS = [
   { value: 'hu', label: 'Hungarian' },
   { value: 'am', label: 'Amharic' },
   { value: 'zu', label: 'Zulu' },
+  // Broader regional coverage — these ride the same Whisper auto-detect path
+  // as the languages above, so adding them here is what actually lets
+  // dictation and "Auto" recognize them (this list also gates which locales
+  // the pinned, single-language browser recognizer can be set to).
+  { value: 'af', label: 'Afrikaans' },
+  { value: 'sq', label: 'Albanian' },
+  { value: 'hy', label: 'Armenian' },
+  { value: 'az', label: 'Azerbaijani' },
+  { value: 'eu', label: 'Basque' },
+  { value: 'be', label: 'Belarusian' },
+  { value: 'bs', label: 'Bosnian' },
+  { value: 'bg', label: 'Bulgarian' },
+  { value: 'ca', label: 'Catalan' },
+  { value: 'hr', label: 'Croatian' },
+  { value: 'et', label: 'Estonian' },
+  { value: 'gl', label: 'Galician' },
+  { value: 'ka', label: 'Georgian' },
+  { value: 'is', label: 'Icelandic' },
+  { value: 'lv', label: 'Latvian' },
+  { value: 'lt', label: 'Lithuanian' },
+  { value: 'lb', label: 'Luxembourgish' },
+  { value: 'mk', label: 'Macedonian' },
+  { value: 'mt', label: 'Maltese' },
+  { value: 'sr', label: 'Serbian' },
+  { value: 'sk', label: 'Slovak' },
+  { value: 'sl', label: 'Slovenian' },
+  { value: 'cy', label: 'Welsh' },
+  { value: 'yi', label: 'Yiddish' },
+  { value: 'gu', label: 'Gujarati' },
+  { value: 'kn', label: 'Kannada' },
+  { value: 'ml', label: 'Malayalam' },
+  { value: 'mr', label: 'Marathi' },
+  { value: 'ne', label: 'Nepali' },
+  { value: 'pa', label: 'Punjabi' },
+  { value: 'ps', label: 'Pashto' },
+  { value: 'sd', label: 'Sindhi' },
+  { value: 'si', label: 'Sinhala' },
+  { value: 'ta', label: 'Tamil' },
+  { value: 'te', label: 'Telugu' },
+  { value: 'bo', label: 'Tibetan' },
+  { value: 'my', label: 'Burmese' },
+  { value: 'km', label: 'Khmer' },
+  { value: 'lo', label: 'Lao' },
+  { value: 'jw', label: 'Javanese' },
+  { value: 'su', label: 'Sundanese' },
+  { value: 'kk', label: 'Kazakh' },
+  { value: 'mn', label: 'Mongolian' },
+  { value: 'tg', label: 'Tajik' },
+  { value: 'tk', label: 'Turkmen' },
+  { value: 'uz', label: 'Uzbek' },
+  { value: 'ha', label: 'Hausa' },
+  { value: 'so', label: 'Somali' },
+  { value: 'sn', label: 'Shona' },
+  { value: 'yo', label: 'Yoruba' },
+  { value: 'mg', label: 'Malagasy' },
+  { value: 'mi', label: 'Maori' },
+  { value: 'ht', label: 'Haitian Creole' },
 ];
+const RECOGNITION_LANGUAGE_CODES = new Set(LANGUAGE_OPTIONS.map(o => o.value).filter(v => v !== 'auto'));
+
+// Maps a BCP-47 locale (the browser/OS locale, navigator.language) down to
+// one of the recognition codes above — used to pick a fallback locale when
+// Whisper's auto-detect confidence comes back low. Falls back to English
+// when the system locale isn't one of ours.
+function toRecognitionLanguageCode(locale) {
+  const primary = (locale || '').split('-')[0].toLowerCase();
+  return RECOGNITION_LANGUAGE_CODES.has(primary) ? primary : 'en';
+}
+
+// The Web Speech API's `lang` property needs a full BCP-47 tag ("es-ES"),
+// not a bare ISO-639-1 code — passing "es" isn't a recognized tag, and
+// Chrome doesn't error on that, it just silently keeps recognizing in
+// whatever locale it was already using (normally English). That made
+// pinning any language other than English silently mishear as English.
+// This maps each of our codes to one real region tag so recognition
+// actually switches; anything the browser truly doesn't support still
+// throws 'language-not-supported', which is already handled by falling
+// back to Whisper.
+const NATIVE_RECOGNITION_LOCALES = {
+  en: 'en-US', fr: 'fr-FR', es: 'es-ES', rw: 'rw-RW', sw: 'sw-KE',
+  de: 'de-DE', it: 'it-IT', pt: 'pt-BR', nl: 'nl-NL', ru: 'ru-RU',
+  uk: 'uk-UA', pl: 'pl-PL', tr: 'tr-TR', ar: 'ar-SA', he: 'he-IL',
+  fa: 'fa-IR', hi: 'hi-IN', ur: 'ur-PK', bn: 'bn-BD', zh: 'zh-CN',
+  ja: 'ja-JP', ko: 'ko-KR', vi: 'vi-VN', th: 'th-TH', id: 'id-ID',
+  ms: 'ms-MY', tl: 'fil-PH', el: 'el-GR', sv: 'sv-SE', no: 'nb-NO',
+  da: 'da-DK', fi: 'fi-FI', cs: 'cs-CZ', ro: 'ro-RO', hu: 'hu-HU',
+  am: 'am-ET', zu: 'zu-ZA', af: 'af-ZA', sq: 'sq-AL', hy: 'hy-AM',
+  az: 'az-AZ', eu: 'eu-ES', be: 'be-BY', bs: 'bs-BA', bg: 'bg-BG',
+  ca: 'ca-ES', hr: 'hr-HR', et: 'et-EE', gl: 'gl-ES', ka: 'ka-GE',
+  is: 'is-IS', lv: 'lv-LV', lt: 'lt-LT', lb: 'lb-LU', mk: 'mk-MK',
+  mt: 'mt-MT', sr: 'sr-RS', sk: 'sk-SK', sl: 'sl-SI', cy: 'cy-GB',
+  yi: 'yi-001', gu: 'gu-IN', kn: 'kn-IN', ml: 'ml-IN', mr: 'mr-IN',
+  ne: 'ne-NP', pa: 'pa-Guru-IN', ps: 'ps-AF', sd: 'sd-IN', si: 'si-LK',
+  ta: 'ta-IN', te: 'te-IN', bo: 'bo-CN', my: 'my-MM', km: 'km-KH',
+  lo: 'lo-LA', jw: 'jv-ID', su: 'su-ID', kk: 'kk-KZ', mn: 'mn-MN',
+  tg: 'tg-TJ', tk: 'tk-TM', uz: 'uz-UZ', ha: 'ha-NG', so: 'so-SO',
+  sn: 'sn-ZW', yo: 'yo-NG', mg: 'mg-MG', mi: 'mi-NZ', ht: 'ht-HT',
+};
 const TONE_OPTIONS = [
   { value: 'default', label: 'Default' },
   { value: 'professional', label: 'Professional' },
@@ -2253,6 +2350,7 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
   const [recentsCollapsed, setRecentsCollapsed] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [voiceError, setVoiceError] = useState("");
+  const [voiceHint, setVoiceHint] = useState("");
   const [openChatMenuId, setOpenChatMenuId] = useState(null);
   const [renamingChatId, setRenamingChatId] = useState(null);
   const [renameValue, setRenameValue] = useState("");
@@ -2368,15 +2466,21 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
     'network': 'Network error during voice recognition.',
   };
 
-  const appendTranscript = (text) => {
-    if (!text) return;
-    setInput(p => (p && !p.endsWith(' ') ? p + ' ' : p) + text);
-    inputRef.current?.focus();
-  };
+  const blobToBase64 = (blob) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
 
-  // Push-to-talk fallback for browsers without SpeechRecognition (Firefox,
-  // and flaky on mobile Safari): record audio and transcribe it server-side
-  // via Groq Whisper instead of live in-browser recognition.
+  // Fallback for browsers without SpeechRecognition (Firefox, flaky on
+  // mobile Safari) and the primary path whenever the user hasn't pinned a
+  // language: record audio and transcribe it server-side via Groq Whisper,
+  // which auto-detects language from the audio itself (ALD) instead of
+  // needing one picked up front. To still feel like live dictation rather
+  // than record-then-wait, the growing recording is re-transcribed every few
+  // seconds so the composer fills in progressively, with one final pass on
+  // stop for the authoritative transcript.
   const startWhisperRecording = async () => {
     if (!navigator.mediaDevices?.getUserMedia) {
       setVoiceError('Voice input is not supported in this browser.');
@@ -2386,24 +2490,57 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const recorder = new MediaRecorder(stream);
       const chunks = [];
-      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-      recorder.onstop = async () => {
-        stream.getTracks().forEach(t => t.stop());
+      const baseText = input && !input.endsWith(' ') ? input + ' ' : input;
+      // A language the user explicitly pinned (reached here only because this
+      // browser lacks SpeechRecognition) is honored as-is — auto-detect only
+      // applies when they left it on "Auto".
+      const pinnedLanguage = (settings.language && settings.language !== 'auto') ? settings.language : null;
+      let languageHint = pinnedLanguage;
+      setVoiceHint('');
+
+      const transcribeSoFar = async () => {
+        if (!chunks.length) return;
         const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
-        if (blob.size === 0) { setIsListening(false); return; }
-        const reader = new FileReader();
-        reader.onloadend = async () => {
-          try {
-            const base64 = reader.result.split(',')[1];
-            const text = await transcribeVoice(base64, blob.type);
-            appendTranscript(text);
-          } catch (err) {
-            setVoiceError(err.message || 'Voice input failed. Try again.');
-          } finally {
-            setIsListening(false);
-          }
-        };
-        reader.readAsDataURL(blob);
+        if (blob.size === 0) return;
+        const base64 = await blobToBase64(blob);
+        const { text, language, confidence } = await transcribeVoice(base64, blob.type, languageHint || undefined);
+        // Whisper transcribes the whole recording-so-far each pass, so the
+        // result already supersedes the last partial — replace, don't append.
+        if (text) setInput(baseText + text);
+        // Fallback behavior: a low-confidence auto-detect pass switches future
+        // passes to the device's system/app locale, but keeps the recording
+        // (and the "listening" indicator) running rather than stopping it —
+        // the user never has to notice or restart anything.
+        if (!pinnedLanguage && !languageHint && typeof confidence === 'number' && confidence < 0.5) {
+          languageHint = toRecognitionLanguageCode(navigator.language);
+          setVoiceHint(`Low confidence — switched to ${LANGUAGE_OPTIONS.find(o => o.value === languageHint)?.label || languageHint}`);
+        } else if (language) {
+          setVoiceHint(`Listening in ${LANGUAGE_OPTIONS.find(o => o.value === language)?.label || language}`);
+        }
+      };
+
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+      // Guards against overlapping passes: if a poll is still waiting on a
+      // slow response when the next tick fires, skip that tick rather than
+      // firing another request whose (possibly out-of-order) reply could
+      // stomp a newer one.
+      let inFlight = null;
+      const pollTimer = setInterval(() => {
+        if (inFlight) return;
+        inFlight = transcribeSoFar().catch(() => {}).finally(() => { inFlight = null; });
+      }, 3500);
+      recorder.onstop = async () => {
+        clearInterval(pollTimer);
+        stream.getTracks().forEach(t => t.stop());
+        try {
+          if (inFlight) await inFlight;
+          await transcribeSoFar();
+        } catch (err) {
+          setVoiceError(err.message || 'Voice input failed. Try again.');
+        } finally {
+          setIsListening(false);
+          inputRef.current?.focus();
+        }
       };
       window.voiceRecorder = recorder;
       recorder.start();
@@ -2415,24 +2552,64 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
 
   const toggleVoice = () => {
     setVoiceError("");
+    setVoiceHint("");
     if(isListening) {
+      // Don't flip isListening here — it's premature. abort()/stop() each
+      // fire their own callback (onend, or the MediaRecorder's onstop ->
+      // transcribe chain) which is what actually turns the indicator off;
+      // setting it here too just causes it to flash off while the Whisper
+      // fallback is still uploading and transcribing in the background.
       window.speechRecognition?.abort();
       if (window.voiceRecorder?.state !== 'inactive') window.voiceRecorder?.stop();
-      setIsListening(false);
       return;
     }
+    // The browser's built-in recognizer only ever listens for one fixed
+    // language per session — it can't tell what language you're actually
+    // speaking. Whisper can (it auto-detects from the audio itself), so
+    // "Auto" — meaning you haven't pinned one specific language — routes
+    // straight to it instead of guessing a single locale and getting
+    // anything else you say misheard. A specific chosen language still uses
+    // the faster, live-captioned native recognizer for that one language.
+    const isAutoLanguage = !settings.language || settings.language === 'auto';
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if(!SR) { startWhisperRecording(); return; }
+    if(isAutoLanguage || !SR) { startWhisperRecording(); return; }
     const r = new SR();
-    r.continuous = false;
-    r.interimResults = false;
-    r.lang = 'en-US';
+    // Live, ChatGPT-style dictation: keep listening across pauses (continuous)
+    // and show words in the composer as they're recognized (interimResults),
+    // instead of staying silent until you stop and dumping one final chunk.
+    r.continuous = true;
+    r.interimResults = true;
+    // Honor the user's chosen reply language for recognition too, mapped to a
+    // real BCP-47 tag the API actually understands (see
+    // NATIVE_RECOGNITION_LOCALES above — a bare code like "es" silently
+    // mishears as English instead of erroring). The 'auto' case never
+    // reaches here — it's routed to Whisper above.
+    r.lang = NATIVE_RECOGNITION_LOCALES[settings.language] || settings.language;
+    const baseText = input && !input.endsWith(' ') ? input + ' ' : input;
+    let finalTranscript = '';
     r.onstart = () => setIsListening(true);
     r.onend = () => setIsListening(false);
-    r.onresult = (e) => appendTranscript(e.results[0][0].transcript);
+    r.onresult = (e) => {
+      let interim = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const transcript = e.results[i][0].transcript;
+        if (e.results[i].isFinal) finalTranscript += transcript;
+        else interim += transcript;
+      }
+      setInput(baseText + finalTranscript + interim);
+    };
     r.onerror = (e) => {
       setIsListening(false);
-      setVoiceError(VOICE_ERROR_MESSAGES[e.error] || 'Voice input failed. Try again.');
+      // 'aborted' fires as the direct result of our own call to .abort()
+      // when the user clicks the mic again to stop — that's a deliberate
+      // stop, not a failure, so it gets no error message.
+      if (e.error === 'aborted') return;
+      // Chrome's built-in recognizer only supports a limited set of
+      // languages — it doesn't know Kinyarwanda, for one. Rather than just
+      // fail, fall back to the Whisper path, which transcribes any language
+      // server-side without needing browser-level language support.
+      if (e.error === 'language-not-supported') { startWhisperRecording(); return; }
+      setVoiceError(VOICE_ERROR_MESSAGES[e.error] || `Voice input failed (${e.error}). Try again.`);
     };
     window.speechRecognition = r;
     r.start();
@@ -2641,7 +2818,7 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
             {showAttachMenu && (
               <div className="composer-menu">
                 <button type="button" onClick={()=>{fileInputRef.current?.click(); setShowAttachMenu(false);}}><Icons.Paperclip size={16}/> <span>Add photos & files</span></button>
-                <button type="button" onClick={()=>{setActiveView('library'); setShowAttachMenu(false);}}><Icons.File size={16}/> <span>Add from library</span></button>
+                <button type="button" onClick={()=>{setActiveView('library'); setShowAttachMenu(false);}}><Icons.Library size={16}/> <span>Add from library</span></button>
                 <button type="button" onClick={()=>{setActiveView('images'); setShowAttachMenu(false);}}><Icons.Image size={16}/> <span>Create image</span></button>
                 <button type="button" className={researchMode==='web'?'active':''} onClick={()=>toggleResearchMode('web')}><Icons.Globe size={16}/> <span>Web search</span> {researchMode==='web' && <Icons.Check size={13}/>}</button>
                 <button type="button" className={researchMode==='deep'?'active':''} onClick={()=>toggleResearchMode('deep')}><Icons.Sparkles size={16}/> <span>Deep research</span> {researchMode==='deep' && <Icons.Check size={13}/>}</button>
@@ -2667,6 +2844,7 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
         </div>
       </form>
       {voiceError && <p className="voice-error">{voiceError}</p>}
+      {!voiceError && isListening && voiceHint && <p className="voice-hint">{voiceHint}</p>}
     </>
   );
 
