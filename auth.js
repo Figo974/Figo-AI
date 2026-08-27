@@ -13,7 +13,14 @@ const DUMMY_HASH = "$2b$10$uucLxNMy4.Xy2WmZEemX2OYViWskmVHpRG0RGsKdtYBoQ05vlUXPy
 
 if (!JWT_SECRET) {
   console.error("Missing JWT_SECRET. Set it in a .env file.");
-  process.exit(1);
+  // Vercel sets VERCEL=1 automatically on every serverless invocation — skip
+  // exiting there, since process.exit() kills the whole function invocation
+  // (reported as "Serverless Function has crashed") instead of just this one
+  // missing-config case. Local/Render runs (no VERCEL env var) still fail
+  // fast with a clear message, same as before.
+  if (!process.env.VERCEL) {
+    process.exit(1);
+  }
 }
 
 function hashPassword(password) {

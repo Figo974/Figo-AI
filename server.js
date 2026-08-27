@@ -94,7 +94,15 @@ const LANGUAGE_NAMES = {
 
 if (!AI_API_KEY) {
   console.error("Missing GROQ_API_KEY. Set it in a .env file (get a free key at https://console.groq.com/keys).");
-  process.exit(1);
+  // Only actually kill the process for a direct run (local/Render) — this
+  // file also gets required as a module by api/index.js on Vercel, where
+  // process.exit() would kill the whole serverless function invocation
+  // (reported as "Serverless Function has crashed") instead of just this
+  // one missing-config case. There, just log it and let requests that
+  // actually need the key fail on their own with a real error message.
+  if (require.main === module) {
+    process.exit(1);
+  }
 }
 
 const USERNAME_RE = /^[a-zA-Z0-9_.-]{3,32}$/;
