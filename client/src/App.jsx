@@ -3019,7 +3019,7 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
             {(messages.length>0 || loading) && (
               <div className="input-area">
                 {renderComposer()}
-                <p className="input-hint">FigoAI is professional and accurate. Verify important information.</p>
+                <p className="input-hint">Figo AI can make mistakes. Check important info.</p>
               </div>
             )}
           </>
