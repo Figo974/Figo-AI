@@ -3,3 +3,4 @@ client/dist/
 client/node_modules/
 .env
 client/.env
+client_secret_*.json

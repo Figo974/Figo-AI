@@ -10,28 +10,37 @@ const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID;
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
 
-// Short-lived CSRF tokens for the OAuth redirect round-trip.
-const pendingStates = new Map();
+// Short-lived CSRF tokens for the OAuth redirect round-trip. Kept in
+// Postgres rather than an in-memory Map: on a serverless host (Vercel) the
+// /api/auth/:provider request that creates the state and the /callback
+// request that consumes it can land on two different, unrelated function
+// instances, so nothing kept in process memory is guaranteed to be visible
+// to both.
 const STATE_TTL_MS = 5 * 60 * 1000;
 
-function createState() {
+async function createState() {
   const state = crypto.randomBytes(16).toString("hex");
-  pendingStates.set(state, Date.now() + STATE_TTL_MS);
+  // Opportunistic cleanup — no background timer, since a serverless
+  // instance can be frozen or torn down between requests.
+  await pool.query("DELETE FROM oauth_states WHERE expires_at < NOW()");
+  // db.js's insert wrapper appends "RETURNING id" to any bare INSERT (for
+  // mysql2-style insertId support), but this table's key is `state`, not
+  // `id` — an explicit RETURNING here heads that off before it 500s on a
+  // nonexistent column.
+  await pool.query("INSERT INTO oauth_states (state, expires_at) VALUES (?, ?) RETURNING state", [state, new Date(Date.now() + STATE_TTL_MS)]);
   return state;
 }
 
-function consumeState(state) {
-  const expires = pendingStates.get(state);
-  pendingStates.delete(state);
-  return !!expires && expires > Date.now();
+async function consumeState(state) {
+  // Two round trips rather than DELETE ... RETURNING: db.js's pool wrapper
+  // treats any UPDATE/DELETE as returning {affectedRows}, not row data (it
+  // mirrors mysql2's shape, which has no RETURNING equivalent), so a
+  // RETURNING clause here would silently come back empty.
+  const [rows] = await pool.query("SELECT expires_at FROM oauth_states WHERE state = ?", [state]);
+  await pool.query("DELETE FROM oauth_states WHERE state = ?", [state]);
+  const row = rows[0];
+  return !!row && new Date(row.expires_at).getTime() > Date.now();
 }
-
-setInterval(() => {
-  const now = Date.now();
-  for (const [state, expires] of pendingStates) {
-    if (expires <= now) pendingStates.delete(state);
-  }
-}, 60 * 1000).unref();
 
 function redirectWithError(res, message) {
   res.redirect(`${CLIENT_URL}/#auth_error=${encodeURIComponent(message)}`);
@@ -86,7 +95,7 @@ async function findOrCreateOAuthUser({ column, providerId, email, displayName, a
 
 function registerOAuthRoutes(app, { signToken, createSession }) {
   // Google
-  app.get("/api/auth/google", (req, res) => {
+  app.get("/api/auth/google", async (req, res) => {
     if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
       return redirectWithError(res, "Google sign-in is not configured on this server yet");
     }
@@ -95,7 +104,7 @@ function registerOAuthRoutes(app, { signToken, createSession }) {
       redirect_uri: `${SERVER_URL}/api/auth/google/callback`,
       response_type: "code",
       scope: "openid email profile",
-      state: createState(),
+      state: await createState(),
       prompt: "select_account",
     });
     res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
@@ -104,7 +113,7 @@ function registerOAuthRoutes(app, { signToken, createSession }) {
   app.get("/api/auth/google/callback", async (req, res) => {
     try {
       const { code, state } = req.query;
-      if (!code || !state || !consumeState(state)) {
+      if (!code || !state || !(await consumeState(state))) {
         return redirectWithError(res, "Invalid or expired sign-in request — please try again");
       }
 
@@ -142,7 +151,7 @@ function registerOAuthRoutes(app, { signToken, createSession }) {
   });
 
   // GitHub
-  app.get("/api/auth/github", (req, res) => {
+  app.get("/api/auth/github", async (req, res) => {
     if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
       return redirectWithError(res, "GitHub sign-in is not configured on this server yet");
     }
@@ -150,7 +159,7 @@ function registerOAuthRoutes(app, { signToken, createSession }) {
       client_id: GITHUB_CLIENT_ID,
       redirect_uri: `${SERVER_URL}/api/auth/github/callback`,
       scope: "read:user user:email",
-      state: createState(),
+      state: await createState(),
     });
     res.redirect(`https://github.com/login/oauth/authorize?${params}`);
   });
@@ -158,7 +167,7 @@ function registerOAuthRoutes(app, { signToken, createSession }) {
   app.get("/api/auth/github/callback", async (req, res) => {
     try {
       const { code, state } = req.query;
-      if (!code || !state || !consumeState(state)) {
+      if (!code || !state || !(await consumeState(state))) {
         return redirectWithError(res, "Invalid or expired sign-in request — please try again");
       }
 

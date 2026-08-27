@@ -146,6 +146,19 @@ async function initDb() {
     )
   `);
 
+  // Short-lived CSRF tokens for the OAuth redirect round-trip (oauth.js).
+  // Serverless hosts (Vercel) can route the initial /api/auth/:provider
+  // request and its /callback to different, unrelated function instances,
+  // so this can't live in an in-memory Map the way it could on a
+  // persistent server — it needs to be visible to whichever instance
+  // handles the callback.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS oauth_states (
+      state VARCHAR(64) PRIMARY KEY,
+      expires_at TIMESTAMP NOT NULL
+    )
+  `);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS family_links (
       id SERIAL PRIMARY KEY,

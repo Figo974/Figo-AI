@@ -29,6 +29,25 @@ app.use(cors());
 // recordings — bump it so /api/voice/transcribe can actually receive one.
 app.use(express.json({ limit: "30mb" }));
 
+// Shared between the direct-run path (start(), below) and the Vercel
+// serverless path (api/index.js) — a serverless cold start has no explicit
+// boot step of its own, so the DB gets initialized lazily on that first
+// request instead, via the middleware right after this. Memoized so a warm
+// instance (or this same process, locally) only ever runs it once.
+let dbReadyPromise = null;
+function ensureDbReady() {
+  if (!dbReadyPromise) {
+    dbReadyPromise = initDb()
+      .then(() => console.log("Database ready"))
+      .catch((error) => {
+        console.error("Could not initialize the database:", error.message);
+        console.error("Auth endpoints will return errors until the database is reachable (check DB_HOST/DB_USER/DB_PASSWORD/DB_NAME).");
+      });
+  }
+  return dbReadyPromise;
+}
+app.use((req, res, next) => { ensureDbReady().then(() => next()); });
+
 const PORT = process.env.PORT || 3000;
 
 const AI_URL = "https://api.groq.com/openai/v1/chat/completions";
@@ -922,13 +941,7 @@ if (fs.existsSync(clientDist)) {
 |--------------------------------------------------------------------------
 */
 async function start() {
-  try {
-    await initDb();
-    console.log("Database ready");
-  } catch (error) {
-    console.error("Could not initialize the database:", error.message);
-    console.error("Auth endpoints will return errors until the database is reachable (check DB_HOST/DB_USER/DB_PASSWORD/DB_NAME).");
-  }
+  await ensureDbReady();
 
   const server = app.listen(PORT, () => {
     console.log(`Server running at: http://localhost:${PORT}`);
@@ -966,4 +979,13 @@ async function start() {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 
-start();
+// Only bind a port when this file is actually run directly (`node server.js`
+// — local dev, or Render/any persistent host). When it's instead required as
+// a module (api/index.js, for Vercel's serverless runtime), skip straight to
+// exporting the Express app below — Vercel's own runtime handles invoking it
+// per request, and there's no long-lived process for a bound port to live in.
+if (require.main === module) {
+  start();
+}
+
+module.exports = app;
