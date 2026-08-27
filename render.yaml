@@ -2,17 +2,15 @@
 #
 # Not deployed yet. When you're ready: push this repo to GitHub, then in the
 # Render dashboard choose "New +" -> "Blueprint" and point it at the repo.
-# Render reads this file and provisions both resources below automatically.
+# Render reads this file and provisions the web service below automatically.
+#
+# The database is a separately-hosted Neon Postgres project, not a Render
+# database — see the DB_* vars below, filled in by hand in the Render
+# dashboard (marked `sync: false`) rather than provisioned here.
 #
 # After the first deploy, a few env vars still need filling in by hand in the
 # Render dashboard (marked `sync: false` below) — see the checklist at the
 # bottom of this file.
-
-databases:
-  - name: figoai-postgres
-    databaseName: figoai
-    plan: free
-    postgresMajorVersion: "16"
 
 services:
   - type: web
@@ -42,26 +40,21 @@ services:
         value: 7d
       - key: ADMIN_USERNAME
         value: figobiziman
+      # Neon Postgres (project shiny-king-95382978) — pooled endpoint, per
+      # Neon's own guidance for web/serverless traffic. Fill in from the
+      # Neon console (Connection Details) if this ever needs regenerating.
       - key: DB_HOST
-        fromDatabase:
-          name: figoai-postgres
-          property: host
+        sync: false
       - key: DB_PORT
-        fromDatabase:
-          name: figoai-postgres
-          property: port
+        value: "5432"
       - key: DB_USER
-        fromDatabase:
-          name: figoai-postgres
-          property: user
+        sync: false
       - key: DB_PASSWORD
-        fromDatabase:
-          name: figoai-postgres
-          property: password
+        sync: false
       - key: DB_NAME
-        fromDatabase:
-          name: figoai-postgres
-          property: database
+        sync: false
+      - key: DB_SSL
+        value: "true"
       # Render assigns the public URL only after the first deploy, so these
       # two can't be templated here — set both to that same URL by hand
       # (Settings -> Environment), e.g. https://figoai.onrender.com for both.
@@ -88,16 +81,14 @@ services:
 # 1. Push this repo to GitHub (Render deploys from a git remote, not a local
 #    folder).
 # 2. Render dashboard -> New -> Blueprint -> select the repo -> it reads this
-#    file and creates the "figoai-postgres" database and "figoai" web service.
+#    file and creates the "figoai" web service.
 # 3. First deploy will fail health checks until you fill in the `sync: false`
-#    vars above (GROQ_API_KEY at minimum). Do that under the service's
-#    Environment tab, then trigger a manual deploy.
+#    vars above (GROQ_API_KEY and the Neon DB_* values at minimum). Do that
+#    under the service's Environment tab, then trigger a manual deploy.
 # 4. Once the service has a URL, set CLIENT_URL and SERVER_URL to it (both
 #    the same value) and redeploy — this fixes OAuth redirects and passkey
 #    (WebAuthn) origin checks, which read CLIENT_URL directly.
 # 5. If you want Google/GitHub sign-in or password-reset emails live, fill in
 #    their env vars too (see .env.example for where each value comes from).
-# 6. Free plan notes: the web service spins down after 15 min idle (first
-#    request after that is slow to wake it), and the free Postgres database
-#    is deleted after 90 days unless upgraded — fine for testing, not for a
-#    real launch.
+# 6. Free plan note: the web service spins down after 15 min idle (first
+#    request after that is slow to wake it).
