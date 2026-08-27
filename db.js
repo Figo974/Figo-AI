@@ -6,6 +6,10 @@ const pgPool = new Pool({
   user: process.env.DB_USER || "postgres",
   password: process.env.DB_PASSWORD || "",
   database: process.env.DB_NAME || "figoai",
+  // Hosted Postgres (Neon, Supabase, etc.) requires TLS; local dev Postgres
+  // normally doesn't have it configured at all, so this stays opt-in via
+  // DB_SSL rather than always-on.
+  ssl: process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : false,
 });
 
 // Without this, a dropped idle connection fires an 'error' event with no
