@@ -2995,6 +2995,7 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
                   <div className="welcome__icon"><img src="/logo-mark.png" alt="" /></div>
                   <h1>Ready when you are, {user.displayName||user.username}</h1>
                   <div className="welcome__composer">{renderComposer()}</div>
+                  <p className="input-hint">Figo AI can make mistakes. Check important info.</p>
                   <div className="welcome__suggestions">
                     {[{icon:<Icons.Image/>,text:"Create an image"},{icon:<Icons.EditCircle/>,text:"Write or edit"}]
                       .filter(s => !dismissedSuggestions.includes(s.text))
