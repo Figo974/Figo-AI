@@ -1,6 +1,6 @@
 *{margin:0;padding:0;box-sizing:border-box}
-#root{height:100vh}
-.app-container{display:flex;height:100vh;overflow:hidden;background:#000;color:#ececec;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
+#root{height:100vh;height:100dvh}
+.app-container{display:flex;height:100vh;height:100dvh;overflow:hidden;background:#000;color:#ececec;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
 .contrast-high .sidebar,.contrast-high .header,.contrast-high .input-wrapper{border-color:rgba(255,255,255,.3)!important}
 .contrast-high .chat-item,.contrast-high .suggestion-link__body,.contrast-high .sidebar__nav-item,.contrast-high .new-chat-btn{color:#fff}
 .contrast-high .settings-section p,.contrast-high .no-chats,.contrast-high .input-hint{color:#e2e8f0}
