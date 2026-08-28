@@ -71,10 +71,10 @@ services:
         sync: false
       - key: GITHUB_CLIENT_SECRET
         sync: false
-      # Optional — leave blank to keep password-reset emails disabled.
-      - key: EMAIL_USER
-        sync: false
-      - key: EMAIL_APP_PASSWORD
+      # Optional — leave blank to keep password-reset emails disabled. Sent
+      # via Resend's HTTP API rather than SMTP, since Render blocks outbound
+      # SMTP ports (that silently broke Gmail SMTP delivery here).
+      - key: RESEND_API_KEY
         sync: false
 
 # --- Before you flip this live ---------------------------------------------

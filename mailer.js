@@ -1,27 +1,32 @@
-const nodemailer = require("nodemailer");
+const axios = require("axios");
 
-const EMAIL_USER = process.env.EMAIL_USER;
-const EMAIL_APP_PASSWORD = process.env.EMAIL_APP_PASSWORD;
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+// Resend's shared onboarding domain works without verifying a custom domain,
+// but until a domain is verified on the Resend account, it can only actually
+// deliver to the email address that account was signed up with — fine for
+// now, revisit once a real domain is verified.
+const FROM_ADDRESS = "FigoAI <onboarding@resend.dev>";
 
-const transporter =
-  EMAIL_USER && EMAIL_APP_PASSWORD
-    ? nodemailer.createTransport({
-        service: "gmail",
-        auth: { user: EMAIL_USER, pass: EMAIL_APP_PASSWORD },
-      })
-    : null;
+const isEmailConfigured = !!RESEND_API_KEY;
+
+async function send({ to, subject, text, html }) {
+  if (!RESEND_API_KEY) {
+    throw new Error("Email sending is not configured on this server");
+  }
+
+  await axios.post(
+    "https://api.resend.com/emails",
+    { from: FROM_ADDRESS, to, subject, text, html },
+    { headers: { Authorization: `Bearer ${RESEND_API_KEY}` } }
+  );
+}
 
 // No logo image here — even a properly inline-marked attachment still makes
 // Gmail's inbox list show an attachment chip next to the subject line.
 // Revisit once FigoAI is deployed and the logo can be a remote <img src>
 // instead of an attached one, which avoids that chip entirely.
 async function sendPasswordResetEmail(to, resetUrl) {
-  if (!transporter) {
-    throw new Error("Email sending is not configured on this server");
-  }
-
-  await transporter.sendMail({
-    from: `"FigoAI" <${EMAIL_USER}>`,
+  await send({
     to,
     subject: "Reset your FigoAI password",
     text: `We received a request to reset your FigoAI password.\n\nReset it here (expires in 1 hour):\n${resetUrl}\n\nIf you didn't request this, you can safely ignore this email.`,
@@ -43,12 +48,7 @@ async function sendPasswordResetEmail(to, resetUrl) {
 }
 
 async function sendPasswordChangedEmail(to) {
-  if (!transporter) {
-    throw new Error("Email sending is not configured on this server");
-  }
-
-  await transporter.sendMail({
-    from: `"FigoAI" <${EMAIL_USER}>`,
+  await send({
     to,
     subject: "Your FigoAI password was changed",
     text: "Your FigoAI account password was just changed. If this wasn't you, reset your password immediately from the sign-in page.",
@@ -67,16 +67,11 @@ async function sendPasswordChangedEmail(to) {
 }
 
 async function sendLoginAlertEmail(to, { deviceType, os, browser, city, regionCode } = {}) {
-  if (!transporter) {
-    throw new Error("Email sending is not configured on this server");
-  }
-
   const device = [browser, os && `on ${os}`].filter(Boolean).join(" ") || deviceType || "a device";
   const location = city ? `${city}${regionCode ? `, ${regionCode}` : ""}` : null;
   const when = new Date().toLocaleString();
 
-  await transporter.sendMail({
-    from: `"FigoAI" <${EMAIL_USER}>`,
+  await send({
     to,
     subject: "New sign-in to your FigoAI account",
     text: `Your FigoAI account (Advanced Account Security enabled) was just signed into from ${device}${location ? ` near ${location}` : ""} at ${when}.\n\nIf this wasn't you, remove the device from Settings > Security and login > Active sessions.`,
@@ -95,15 +90,10 @@ async function sendLoginAlertEmail(to, { deviceType, os, browser, city, regionCo
 }
 
 async function sendFamilyInviteEmail(to, { inviterName, relation, inviteUrl }) {
-  if (!transporter) {
-    throw new Error("Email sending is not configured on this server");
-  }
-
   // relation describes how the INVITEE relates to the inviter's family.
   const roleText = relation === "child" ? "as their child" : "as their parent or guardian";
 
-  await transporter.sendMail({
-    from: `"FigoAI" <${EMAIL_USER}>`,
+  await send({
     to,
     subject: `${inviterName} invited you to link FigoAI accounts`,
     text: `${inviterName} wants to link accounts with you on FigoAI ${roleText}.\n\nAccept the invite here (expires in 7 days):\n${inviteUrl}\n\nIf your family member is new to FigoAI, they'll be asked to create an account first.\n\nIf you weren't expecting this, you can safely ignore this email.`,
@@ -124,4 +114,4 @@ async function sendFamilyInviteEmail(to, { inviterName, relation, inviteUrl }) {
   });
 }
 
-module.exports = { sendPasswordResetEmail, sendPasswordChangedEmail, sendLoginAlertEmail, sendFamilyInviteEmail, isEmailConfigured: !!transporter };
+module.exports = { sendPasswordResetEmail, sendPasswordChangedEmail, sendLoginAlertEmail, sendFamilyInviteEmail, isEmailConfigured };
