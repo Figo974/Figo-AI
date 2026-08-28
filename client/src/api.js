@@ -123,6 +123,19 @@ export async function updateDisplayName(displayName) {
   return res.json();
 }
 
+export async function updateAvatar(avatarUrl) {
+  const res = await fetch(`${API_BASE}/auth/avatar`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${getToken()}`,
+    },
+    body: JSON.stringify({ avatarUrl }),
+  });
+  if (!res.ok) throw await parseError(res, 'Could not update profile photo');
+  return res.json();
+}
+
 export async function updateEmail(email, currentPassword) {
   const res = await fetch(`${API_BASE}/auth/email`, {
     method: 'PATCH',

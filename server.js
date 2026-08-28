@@ -108,6 +108,9 @@ if (!AI_API_KEY) {
 const USERNAME_RE = /^[a-zA-Z0-9_.-]{3,32}$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MIN_PASSWORD_LENGTH = 8;
+// Data URL string length, not decoded bytes — comfortably covers a
+// reasonably-sized photo without letting the users table bloat unbounded.
+const MAX_AVATAR_DATA_URL_LENGTH = 2_000_000;
 
 // groq/compound runs its own web searches and reports raw results in
 // executed_tools; pull out clean {title, url} citations for the client to show.
@@ -263,7 +266,7 @@ app.post("/api/auth/register", async (req, res) => {
       [username, normalizedEmail, passwordHash, username]
     );
 
-    const user = { id: result.insertId, username, email: normalizedEmail, displayName: username, advancedSecurityEnrolled: false, hasPassword: true, isAdmin: false };
+    const user = { id: result.insertId, username, email: normalizedEmail, displayName: username, avatarUrl: null, advancedSecurityEnrolled: false, hasPassword: true, isAdmin: false };
     const { jti, expiresIn } = await createSession(pool, user.id, req);
     const token = signToken(user, jti, expiresIn);
 
@@ -284,7 +287,7 @@ app.post("/api/auth/login", async (req, res) => {
 
     const identifier = username.trim();
     const [rows] = await pool.query(
-      "SELECT id, username, email, password_hash, display_name, advanced_security_enrolled, is_admin FROM users WHERE username = ? OR email = ?",
+      "SELECT id, username, email, password_hash, display_name, avatar_url, advanced_security_enrolled, is_admin FROM users WHERE username = ? OR email = ?",
       [identifier, identifier.toLowerCase()]
     );
     const row = rows[0];
@@ -300,7 +303,7 @@ app.post("/api/auth/login", async (req, res) => {
       });
     }
 
-    const user = { id: row.id, username: row.username, email: row.email, displayName: row.display_name, advancedSecurityEnrolled: false, hasPassword: true, isAdmin: !!row.is_admin };
+    const user = { id: row.id, username: row.username, email: row.email, displayName: row.display_name, avatarUrl: row.avatar_url, advancedSecurityEnrolled: false, hasPassword: true, isAdmin: !!row.is_admin };
     const { jti, expiresIn } = await createSession(pool, user.id, req);
     const token = signToken(user, jti, expiresIn);
 
@@ -314,7 +317,7 @@ app.post("/api/auth/login", async (req, res) => {
 app.get("/api/auth/me", authenticate, async (req, res) => {
   try {
     const [rows] = await pool.query(
-      "SELECT id, username, email, display_name, advanced_security_enrolled, password_hash, is_admin FROM users WHERE id = ?",
+      "SELECT id, username, email, display_name, avatar_url, advanced_security_enrolled, password_hash, is_admin FROM users WHERE id = ?",
       [req.user.id]
     );
     const row = rows[0];
@@ -328,6 +331,7 @@ app.get("/api/auth/me", authenticate, async (req, res) => {
         username: row.username,
         email: row.email,
         displayName: row.display_name,
+        avatarUrl: row.avatar_url,
         advancedSecurityEnrolled: !!row.advanced_security_enrolled,
         hasPassword: !!row.password_hash,
         isAdmin: !!row.is_admin,
@@ -375,6 +379,24 @@ app.patch("/api/auth/display-name", authenticate, async (req, res) => {
   } catch (error) {
     console.error("Update display name error:", error.message);
     return res.status(500).json({ success: false, error: "Could not update display name. Try again later." });
+  }
+});
+
+app.patch("/api/auth/avatar", authenticate, async (req, res) => {
+  try {
+    const { avatarUrl } = req.body || {};
+    if (avatarUrl !== null && (typeof avatarUrl !== "string" || !avatarUrl.startsWith("data:image/"))) {
+      return res.status(400).json({ success: false, error: "Avatar must be an image, or null to remove it" });
+    }
+    if (typeof avatarUrl === "string" && avatarUrl.length > MAX_AVATAR_DATA_URL_LENGTH) {
+      return res.status(400).json({ success: false, error: "That image is too large — try a smaller photo" });
+    }
+
+    await pool.query("UPDATE users SET avatar_url = ? WHERE id = ?", [avatarUrl, req.user.id]);
+    return res.json({ success: true, avatarUrl });
+  } catch (error) {
+    console.error("Update avatar error:", error.message);
+    return res.status(500).json({ success: false, error: "Could not update profile photo. Try again later." });
   }
 });
 

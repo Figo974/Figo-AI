@@ -86,6 +86,7 @@ async function initDb() {
   await ensureColumn("users", "reset_token_hash", "reset_token_hash VARCHAR(64) NULL");
   await ensureColumn("users", "reset_token_expires", "reset_token_expires TIMESTAMP NULL");
   await ensureColumn("users", "advanced_security_enrolled", "advanced_security_enrolled BOOLEAN NOT NULL DEFAULT FALSE");
+  await ensureColumn("users", "avatar_url", "avatar_url TEXT NULL");
   await pool.query("ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL");
 
   // Admin is a real per-user flag (not a hardcoded username) so the first

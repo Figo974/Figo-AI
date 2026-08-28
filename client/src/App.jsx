@@ -5,7 +5,7 @@ import {
   listSessions, revokeSession, logoutAllSessions,
   enrollAdvancedSecurity, unenrollAdvancedSecurity,
   sendFamilyInvite, listFamily, cancelFamilyInvite, removeFamilyLink,
-  updateUsername, updateDisplayName, updateEmail, deleteAccount,
+  updateUsername, updateDisplayName, updateAvatar, updateEmail, deleteAccount,
 } from "./api.js";
 import { startRegistration, browserSupportsWebAuthn } from "@simplewebauthn/browser";
 import { Icons } from "./icons.jsx";
@@ -104,6 +104,9 @@ function ProfilePanel({ user, onUpdate, onClose }) {
       if (trimmedUsername !== (user?.username || '')) {
         await updateUsername(trimmedUsername);
         updates.username = trimmedUsername;
+      }
+      if (avatarUrl !== (user?.avatarUrl || '')) {
+        await updateAvatar(avatarUrl || null);
       }
       onUpdate(updates);
       onClose();
