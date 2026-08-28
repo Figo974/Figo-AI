@@ -379,7 +379,7 @@
 .send-btn{width:40px;height:40px;border-radius:50%;background:var(--accent, #a1a1aa);border:none;color:#0a0a0b;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .2s;flex-shrink:0}
 .send-btn:hover:not(:disabled){transform:scale(1.06);box-shadow:0 6px 20px rgba(161,161,170,.4)}
 .send-btn:disabled{opacity:.4;cursor:not-allowed}
-.input-hint{text-align:center;font-size:11px;color:#334155;margin-top:8px}
+.input-hint{text-align:center;font-size:11px;color:#fff;margin-top:8px}
 .voice-error{text-align:center;font-size:12px;color:#f87171;margin-top:8px}
 .voice-hint{text-align:center;font-size:12px;color:#94a3b8;margin-top:8px}
 
@@ -852,6 +852,7 @@ button.account-row:hover .account-row__value{color:#fff}
   .message__body{max-width:85%}
   .welcome{padding:24px 16px}
   .welcome__composer{order:1;margin-bottom:0}
+  .welcome .input-hint{order:1}
   .welcome__suggestions{flex-direction:column;gap:8px;margin-bottom:12px}
   .suggestion-link{background:rgba(255,255,255,.06);border-radius:20px}
   .suggestion-link__dismiss{display:flex}
