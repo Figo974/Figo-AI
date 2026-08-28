@@ -20,7 +20,10 @@ function buildProfile(authUser, cached) {
     ...authUser,
     displayName: cached?.displayName || authUser.displayName || authUser.username,
     bio: cached?.bio || "",
-    avatarUrl: cached?.avatarUrl || "",
+    // authUser.avatarUrl is the server-persisted value (or an OAuth provider's
+    // photo, passed through on that login) — only fall back to a cached local
+    // value when the server has nothing at all.
+    avatarUrl: authUser.avatarUrl || cached?.avatarUrl || "",
   };
 }
 
