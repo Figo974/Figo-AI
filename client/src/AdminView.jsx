@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Icons } from "./icons.jsx";
 import {
   getAdminOverview, listAdminUsers, deleteAdminUser, burnAdminUser, promoteAdminUser, demoteAdminUser,
+  promoteSuperAdminUser, demoteSuperAdminUser,
   listAdminPasskeys, deleteAdminPasskey,
   listAdminSessions, revokeAdminSession,
   listAdminFamily, cancelAdminFamilyInvite, removeAdminFamilyLink,
@@ -145,7 +146,23 @@ function UsersTab({ currentUserId, isSuperAdmin }) {
     setBusyId(u.id);
     try {
       await (u.isAdmin ? demoteAdminUser(u.id) : promoteAdminUser(u.id));
-      patchUser(u.id, { isAdmin: !u.isAdmin });
+      // Demoting from admin takes super admin with it too (server enforces
+      // the same rule), so clear both here rather than just isAdmin.
+      patchUser(u.id, u.isAdmin ? { isAdmin: false, isSuperAdmin: false } : { isAdmin: true });
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleToggleSuperAdmin = async (u) => {
+    if (u.isSuperAdmin && !confirm(`Remove super admin access from ${u.username}?`)) return;
+    setBusyId(u.id);
+    try {
+      await (u.isSuperAdmin ? demoteSuperAdminUser(u.id) : promoteSuperAdminUser(u.id));
+      // Granting super admin also grants admin server-side, if it wasn't set already.
+      patchUser(u.id, u.isSuperAdmin ? { isSuperAdmin: false } : { isSuperAdmin: true, isAdmin: true });
     } catch (e) {
       alert(e.message);
     } finally {
@@ -178,6 +195,11 @@ function UsersTab({ currentUserId, isSuperAdmin }) {
               {isSuperAdmin && (
                 <button className="admin-outline-btn" disabled={busyId === u.id} onClick={() => handleToggleAdmin(u)} title={u.isAdmin ? "Remove admin access" : "Make admin"}>
                   <Icons.Shield size={14}/> {u.isAdmin ? "Remove admin" : "Make admin"}
+                </button>
+              )}
+              {isSuperAdmin && !isSelf && (
+                <button className="admin-outline-btn" disabled={busyId === u.id} onClick={() => handleToggleSuperAdmin(u)} title={u.isSuperAdmin ? "Remove super admin access" : "Make super admin"}>
+                  <Icons.Shield size={14}/> {u.isSuperAdmin ? "Remove super admin" : "Make super admin"}
                 </button>
               )}
               {!isSelf && u.activeSessions > 0 && (

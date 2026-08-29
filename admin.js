@@ -173,7 +173,11 @@ function registerAdminRoutes(app, { pool, authenticate, isEmailConfigured, model
       if (targetId === req.user.id) {
         return res.status(400).json({ success: false, error: "You can't remove your own admin access" });
       }
-      const [result] = await pool.query("UPDATE users SET is_admin = FALSE WHERE id = ?", [targetId]);
+      // A super admin is necessarily also an admin, so losing admin access
+      // has to take super admin with it — otherwise a user could end up
+      // is_super_admin = TRUE while is_admin = FALSE, which every other route
+      // here (and the UI) assumes can't happen.
+      const [result] = await pool.query("UPDATE users SET is_admin = FALSE, is_super_admin = FALSE WHERE id = ?", [targetId]);
       if (result.affectedRows === 0) {
         return res.status(404).json({ success: false, error: "User not found" });
       }
@@ -181,6 +185,41 @@ function registerAdminRoutes(app, { pool, authenticate, isEmailConfigured, model
     } catch (error) {
       console.error("Admin demote user error:", error.message);
       return res.status(500).json({ success: false, error: "Could not remove admin access" });
+    }
+  });
+
+  // Only an existing super admin can create another one — this is the one
+  // place that escalation happens through the UI (everything else about
+  // super admin was a deploy-time-only DB bootstrap until now).
+  app.post("/api/admin/users/:id/promote-super", authenticate, requireSuperAdmin, async (req, res) => {
+    try {
+      // Super admin implies admin, so grant both in case the target wasn't
+      // already a regular admin.
+      const [result] = await pool.query("UPDATE users SET is_admin = TRUE, is_super_admin = TRUE WHERE id = ?", [req.params.id]);
+      if (result.affectedRows === 0) {
+        return res.status(404).json({ success: false, error: "User not found" });
+      }
+      return res.json({ success: true });
+    } catch (error) {
+      console.error("Admin promote-super user error:", error.message);
+      return res.status(500).json({ success: false, error: "Could not make that user a super admin" });
+    }
+  });
+
+  app.post("/api/admin/users/:id/demote-super", authenticate, requireSuperAdmin, async (req, res) => {
+    try {
+      const targetId = Number(req.params.id);
+      if (targetId === req.user.id) {
+        return res.status(400).json({ success: false, error: "You can't remove your own super admin access" });
+      }
+      const [result] = await pool.query("UPDATE users SET is_super_admin = FALSE WHERE id = ?", [targetId]);
+      if (result.affectedRows === 0) {
+        return res.status(404).json({ success: false, error: "User not found" });
+      }
+      return res.json({ success: true });
+    } catch (error) {
+      console.error("Admin demote-super user error:", error.message);
+      return res.status(500).json({ success: false, error: "Could not remove super admin access" });
     }
   });
 

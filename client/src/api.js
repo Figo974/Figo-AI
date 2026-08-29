@@ -412,6 +412,8 @@ function adminUserAction(action, fallback) {
 export const burnAdminUser = adminUserAction('burn', 'Could not log that user out');
 export const promoteAdminUser = adminUserAction('promote', 'Could not make that user an admin');
 export const demoteAdminUser = adminUserAction('demote', 'Could not remove admin access');
+export const promoteSuperAdminUser = adminUserAction('promote-super', 'Could not make that user a super admin');
+export const demoteSuperAdminUser = adminUserAction('demote-super', 'Could not remove super admin access');
 
 export async function deleteAdminPasskey(id) {
   const res = await fetch(`${API_BASE}/admin/passkeys/${id}`, {
