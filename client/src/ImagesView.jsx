@@ -12,8 +12,13 @@ const STYLE_PRESETS = [
   { label: "Watercolor", suffix: "watercolor painting style, soft edges" },
 ];
 
+// 2048x2048 keeps parity with 4K's ~8.3-megapixel count in a square frame
+// (true 3840x2160 is a widescreen spec that doesn't fit an icon/avatar-sized
+// square canvas). "flux" is Pollinations' photorealistic-capable model —
+// noticeably sharper and more coherent than their default — and enhance=true
+// runs the prompt through their own rewrite step for better composition.
 function buildImageUrl(prompt, seed) {
-  const params = new URLSearchParams({ width: "768", height: "768", nologo: "true", seed: String(seed) });
+  const params = new URLSearchParams({ width: "2048", height: "2048", model: "flux", enhance: "true", nologo: "true", seed: String(seed) });
   // Quality/detail keywords consistently push Pollinations toward a sharper, more
   // finished result — harmless to add even when a style preset already has its own suffix.
   const fullPrompt = `${prompt}, high quality, detailed, sharp focus`;

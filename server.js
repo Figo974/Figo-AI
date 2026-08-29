@@ -28,6 +28,21 @@ app.use(cors());
 // Default express.json() limit (100kb) is way too small for base64 voice
 // recordings — bump it so /api/voice/transcribe can actually receive one.
 app.use(express.json({ limit: "30mb" }));
+// The sandboxed Workspace feature runs a WebContainer (a real, isolated
+// Node.js filesystem + shell) entirely in the browser tab via WASM, which
+// needs SharedArrayBuffer — browsers only grant that to a "cross-origin
+// isolated" page. COOP is safe site-wide (OAuth here is redirect-based, not
+// window.opener popups). COEP uses "credentialless" rather than the stricter
+// "require-corp": this is a single-page app, so these headers apply to every
+// route, and require-corp would silently break any cross-origin image that
+// doesn't send its own Cross-Origin-Resource-Policy header — which includes
+// Pollinations-generated images and arbitrary custom avatar URLs. Not
+// supported in Safari, so Workspace just won't be available there.
+app.use((req, res, next) => {
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  res.setHeader("Cross-Origin-Embedder-Policy", "credentialless");
+  next();
+});
 
 // Shared between the direct-run path (start(), below) and the Vercel
 // serverless path (api/index.js) — a serverless cold start has no explicit
@@ -71,25 +86,7 @@ const VISION_MODEL = "qwen/qwen3.8-27b";
 // language the user wrote in, which is its normal default behavior. Keys must
 // match client/src/App.jsx's LANGUAGE_OPTIONS.
 const LANGUAGE_NAMES = {
-  en: "English", fr: "French", es: "Spanish", rw: "Kinyarwanda", sw: "Swahili",
-  de: "German", it: "Italian", pt: "Portuguese", nl: "Dutch", ru: "Russian",
-  uk: "Ukrainian", pl: "Polish", tr: "Turkish", ar: "Arabic", he: "Hebrew",
-  fa: "Persian", hi: "Hindi", ur: "Urdu", bn: "Bengali", zh: "Chinese (Simplified)",
-  ja: "Japanese", ko: "Korean", vi: "Vietnamese", th: "Thai", id: "Indonesian",
-  ms: "Malay", tl: "Filipino", el: "Greek", sv: "Swedish", no: "Norwegian",
-  da: "Danish", fi: "Finnish", cs: "Czech", ro: "Romanian", hu: "Hungarian",
-  am: "Amharic", zu: "Zulu",
-  af: "Afrikaans", sq: "Albanian", hy: "Armenian", az: "Azerbaijani", eu: "Basque",
-  be: "Belarusian", bs: "Bosnian", bg: "Bulgarian", ca: "Catalan", hr: "Croatian",
-  et: "Estonian", gl: "Galician", ka: "Georgian", is: "Icelandic", lv: "Latvian",
-  lt: "Lithuanian", lb: "Luxembourgish", mk: "Macedonian", mt: "Maltese", sr: "Serbian",
-  sk: "Slovak", sl: "Slovenian", cy: "Welsh", yi: "Yiddish",
-  gu: "Gujarati", kn: "Kannada", ml: "Malayalam", mr: "Marathi", ne: "Nepali",
-  pa: "Punjabi", ps: "Pashto", sd: "Sindhi", si: "Sinhala", ta: "Tamil", te: "Telugu",
-  bo: "Tibetan", my: "Burmese", km: "Khmer", lo: "Lao", jw: "Javanese", su: "Sundanese",
-  kk: "Kazakh", mn: "Mongolian", tg: "Tajik", tk: "Turkmen", uz: "Uzbek",
-  ha: "Hausa", so: "Somali", sn: "Shona", yo: "Yoruba", mg: "Malagasy", mi: "Maori",
-  ht: "Haitian Creole",
+  en: "English", fr: "French", es: "Spanish",
 };
 
 if (!AI_API_KEY) {
@@ -133,6 +130,78 @@ function extractSources(executedTools) {
 }
 
 const MAX_ATTACHMENT_TEXT_CHARS = 8000;
+
+// The Workspace feature gives the assistant a real (but sandboxed) Node.js
+// filesystem + shell — a WebContainer running entirely in the user's own
+// browser tab, not on this server. This server never executes any of these
+// itself; it only forwards the tool schema to Groq and relays whatever tool
+// calls come back to the client, which actually runs them (see WORKSPACE_MAX_TOOL_ROUNDS
+// below and the /api/chat handler for the relay loop).
+const WORKSPACE_TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "read_file",
+      description: "Read the full text contents of a file in the user's sandboxed workspace.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Path relative to the workspace root, e.g. 'src/index.js'." },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "write_file",
+      description: "Create or overwrite a file in the user's sandboxed workspace, creating parent directories as needed.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Path relative to the workspace root, e.g. 'src/index.js'." },
+          content: { type: "string", description: "The full new contents of the file." },
+        },
+        required: ["path", "content"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_dir",
+      description: "List files and folders in the user's sandboxed workspace, recursively.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Directory to list, relative to the workspace root. Defaults to the root." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "run_command",
+      description: "Run a shell command in the user's sandboxed workspace (a real but isolated Node.js environment: npm, node, and standard POSIX utilities are available) and return its output.",
+      parameters: {
+        type: "object",
+        properties: {
+          command: { type: "string", description: "The full command line to run, e.g. 'npm install' or 'node index.js'." },
+        },
+        required: ["command"],
+      },
+    },
+  },
+];
+// Groq's own compound tool-use budget aside, this bounds how many times a
+// single chat turn can bounce between "assistant asks for a tool" and "client
+// runs it" before we just stop and return whatever the model has said so far
+// — protects against a model stuck in a tool-call loop burning the user's
+// Groq quota and the client's WebContainer indefinitely.
+const WORKSPACE_MAX_TOOL_ROUNDS = 8;
+const MAX_TOOL_RESULT_CHARS = 4000;
 
 // Attachments arrive as {name, type, url} where url is a data: URI (same
 // shape the client already builds for its own preview). Pull real text out
@@ -639,6 +708,30 @@ app.post("/api/chat", authenticate, async (req, res) => {
     const smartMode = req.body.smart === true;
     const supportsReasoningEffort = requestedModelForCompletion.startsWith("openai/gpt-oss");
 
+    // Workspace: the client sends workspaceEnabled once it has a booted
+    // WebContainer to run tools against, plus (on continuation calls within
+    // the same turn) the toolTurn messages accumulated so far — the
+    // assistant's tool_calls message and the matching tool-result messages
+    // the client got back from actually running them. The vision model
+    // doesn't support tool calling, so image attachments disable it too.
+    const workspaceEnabled = req.body.workspaceEnabled === true
+      && imageAttachments.length === 0
+      && requestedModelForCompletion.startsWith("openai/gpt-oss");
+    const rawToolTurn = Array.isArray(req.body.toolTurn) ? req.body.toolTurn : [];
+    // Each round is one assistant tool_calls message; cap it server-side so a
+    // model stuck calling tools can't loop forever on the user's Groq quota.
+    const toolRounds = rawToolTurn.filter(m => m?.role === "assistant" && Array.isArray(m.tool_calls)).length;
+    if (workspaceEnabled && toolRounds > WORKSPACE_MAX_TOOL_ROUNDS) {
+      return res.status(400).json({ success: false, error: "Too many tool calls in one turn — ask a narrower question." });
+    }
+    const toolTurn = workspaceEnabled
+      ? rawToolTurn
+          .filter(m => m && (m.role === "assistant" || m.role === "tool"))
+          .map(m => m.role === "assistant"
+            ? { role: "assistant", content: m.content ?? null, tool_calls: Array.isArray(m.tool_calls) ? m.tool_calls : undefined }
+            : { role: "tool", tool_call_id: String(m.tool_call_id || ""), content: String(m.content ?? "").slice(0, MAX_TOOL_RESULT_CHARS) })
+      : [];
+
     let messageText = userMessage;
     if (fileAttachments.length > 0) {
       const extracted = await Promise.all(fileAttachments.map(async (att) => {
@@ -683,34 +776,89 @@ app.post("/api/chat", authenticate, async (req, res) => {
           (deepResearch
             ? " The user turned on Deep Research: this overrides your usual brevity rule. Run multiple searches to cover the topic from several angles, then write a genuinely thorough report — background/context, the current state of the topic, key facts with their sources, differing perspectives where they exist, and a short synthesis at the end. Organize it with headings and don't pad it — every section should carry real information, not restate the question."
             : "") +
-          (replyLanguage ? ` Always reply in ${replyLanguage}, regardless of what language the user writes in.` : "") +
+          (replyLanguage
+            ? ` Always reply in ${replyLanguage}, regardless of what language the user writes in.`
+            : " Reply in the same language the user's most recent message is written in. If that message is too short or ambiguous to tell, use the language the conversation has been in so far, or default to English. Never switch languages on your own — only switch if the user explicitly writes in, or asks for, a different language.") +
+          (workspaceEnabled
+            ? " The user has a sandboxed Workspace open — a real but isolated Node.js filesystem and terminal only you and they can see, not the real internet or their actual computer. Use the read_file, write_file, list_dir, and run_command tools to actually build/inspect/run things there instead of just describing code. Prefer running a command to verify something (e.g. actually running a script) over guessing at its output. Keep tool calls purposeful — don't explore aimlessly."
+            : "") +
           personalizationPrompt,
       },
       ...trimmed,
+      ...toolTurn,
     ];
 
     console.log("Sending request to Groq...");
 
     // Call Groq
-    const response = await axios.post(
-      AI_URL,
-      {
-        model: requestedModelForCompletion,
-        messages: messages,
-        temperature,
-        stream: false,
-        ...(supportsReasoningEffort ? { reasoning_effort: smartMode ? "high" : "medium" } : {}),
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${requestedModelForCompletion.startsWith("groq/compound") ? SEARCH_API_KEY : AI_API_KEY}`,
-          "Content-Type": "application/json",
+    let response;
+    let usedModel = requestedModelForCompletion;
+    try {
+      response = await axios.post(
+        AI_URL,
+        {
+          model: requestedModelForCompletion,
+          messages: messages,
+          temperature,
+          stream: false,
+          ...(supportsReasoningEffort ? { reasoning_effort: smartMode ? "high" : "medium" } : {}),
+          ...(workspaceEnabled ? { tools: WORKSPACE_TOOLS } : {}),
         },
-        timeout: deepResearch ? 120000 : 60000,
-      }
-    );
+        {
+          headers: {
+            Authorization: `Bearer ${requestedModelForCompletion.startsWith("groq/compound") ? SEARCH_API_KEY : AI_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          timeout: deepResearch ? 120000 : 60000,
+        }
+      );
+    } catch (error) {
+      // groq/compound's free-tier search budget is small and shared across
+      // every compound call, so it's the first thing to get rate-limited —
+      // and since web search now defaults on for everyone, that budget runs
+      // out constantly. Rather than surface an error for what's meant to be
+      // an invisible enhancement, fall back once to the reliable non-search
+      // model and answer without live search instead of failing the turn.
+      const code = error.response?.data?.error?.code;
+      const isRateLimited = error.response?.status === 429 || code === "rate_limit_exceeded" || code === "request_too_large";
+      if (!isRateLimited || !requestedModelForCompletion.startsWith("groq/compound")) throw error;
+
+      console.warn(`Groq compound rate-limited — falling back to ${MODEL} for this reply`);
+      usedModel = MODEL;
+      response = await axios.post(
+        AI_URL,
+        {
+          model: MODEL,
+          messages: messages,
+          temperature,
+          stream: false,
+          reasoning_effort: smartMode ? "high" : "medium",
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${AI_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          timeout: deepResearch ? 120000 : 60000,
+        }
+      );
+    }
 
     const responseMessage = response.data?.choices?.[0]?.message;
+
+    // The model asked to use a Workspace tool instead of replying — this
+    // server can't run it (the sandbox lives in the user's browser), so hand
+    // the tool calls back to the client. It executes them against the
+    // WebContainer and re-POSTs here with the results appended to toolTurn.
+    if (workspaceEnabled && Array.isArray(responseMessage?.tool_calls) && responseMessage.tool_calls.length > 0) {
+      return res.json({
+        success: true,
+        needsTool: true,
+        assistantMessage: { role: "assistant", content: responseMessage.content ?? null, tool_calls: responseMessage.tool_calls },
+        model: requestedModelForCompletion,
+      });
+    }
+
     const assistantReply = responseMessage?.content;
 
     if (!assistantReply) {
@@ -734,7 +882,12 @@ app.post("/api/chat", authenticate, async (req, res) => {
           // Pollinations' seed is expected to fit a normal int range — a raw
           // Date.now() timestamp (13 digits) overflows that and makes the
           // image request hang or 500, so keep it random but small instead.
-          url: `https://image.pollinations.ai/prompt/${encodeURIComponent(`${imagePrompt}, high quality, detailed`)}?width=768&height=768&nologo=true&seed=${Math.floor(Math.random() * 1e9)}`,
+          // "flux" is Pollinations' photorealistic model (vs. the faster but
+          // flatter default), enhance=true runs the prompt through their own
+          // LLM rewrite for better composition, and 3840x2160 is true 4K UHD
+          // — this path only fires for real, photographable subjects (see
+          // the system prompt), so photorealism is always the right call here.
+          url: `https://image.pollinations.ai/prompt/${encodeURIComponent(`${imagePrompt}, photorealistic, ultra realistic, highly detailed, sharp focus`)}?width=3840&height=2160&model=flux&enhance=true&nologo=true&seed=${Math.floor(Math.random() * 1e9)}`,
           prompt: imagePrompt,
         }]
       : [];
@@ -744,7 +897,7 @@ app.post("/api/chat", authenticate, async (req, res) => {
     return res.json({
       success: true,
       reply: cleanReply,
-      model: requestedModelForCompletion,
+      model: usedModel,
       sources,
       images,
     });

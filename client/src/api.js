@@ -162,17 +162,18 @@ export async function deleteAccount(password) {
   return res.json();
 }
 
-export async function sendMessage(message, { temperature, model, deepResearch, language, personalization, history, smart, attachments } = {}) {
+export async function sendMessage(message, { temperature, model, deepResearch, language, personalization, history, smart, attachments, workspaceEnabled, toolTurn } = {}) {
   const res = await fetch(`${API_BASE}/chat`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${getToken()}`,
     },
-    body: JSON.stringify({ message, temperature, model, deepResearch, language, personalization, history, smart, attachments }),
+    body: JSON.stringify({ message, temperature, model, deepResearch, language, personalization, history, smart, attachments, workspaceEnabled, toolTurn }),
   });
   if (!res.ok) throw await parseError(res, 'Failed to send message');
   const data = await res.json();
+  if (data.needsTool) return { needsTool: true, assistantMessage: data.assistantMessage };
   return { reply: data.reply, sources: data.sources || [], images: data.images || [] };
 }
 

@@ -13,6 +13,8 @@ import { getAvatarInitial, getAvatarColor } from "./constants.js";
 import ImagesView from "./ImagesView.jsx";
 import LibraryView, { getLibraryStats } from "./LibraryView.jsx";
 import ProjectsView from "./ProjectsView.jsx";
+import WorkspacePanel from "./workspace/WorkspacePanel.jsx";
+import { useWebContainer } from "./workspace/useWebContainer.js";
 import DataControlsView from "./DataControlsView.jsx";
 import AdminView from "./AdminView.jsx";
 import "./App.css";
@@ -2001,10 +2003,35 @@ function sourceHostname(url) {
   }
 }
 
+function ToolStepMessage({ msg }) {
+  const [open, setOpen] = useState(false);
+  const label = msg.toolName === 'run_command' ? 'Ran a command'
+    : msg.toolName === 'write_file' ? 'Wrote a file'
+    : msg.toolName === 'read_file' ? 'Read a file'
+    : msg.toolName === 'list_dir' ? 'Listed files'
+    : `Used ${msg.toolName}`;
+  return (
+    <div className="message message--assistant message--tool-step">
+      <div className="message__body">
+        <button type="button" className="tool-step" onClick={() => setOpen(v => !v)}>
+          <Icons.Terminal size={13} />
+          <span>{label}</span>
+          <Icons.ChevronRight size={12} style={{ transform: open ? 'rotate(90deg)' : 'none' }} />
+        </button>
+        {open && (
+          <pre className="tool-step__output">{msg.toolOutput}</pre>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Message({ msg, onCopy, onLike, onDislike, onReply, onRegenerate, onEdit, onShare }) {
   const [copied, setCopied] = useState(false);
   const [liked, setLiked] = useState(msg.liked || false);
   const [disliked, setDisliked] = useState(msg.disliked || false);
+
+  if (msg.isToolStep) return <ToolStepMessage msg={msg} />;
 
   const handleCopy = () => { onCopy(msg.content); setCopied(true); setTimeout(()=>setCopied(false),2000); };
 
@@ -2107,97 +2134,6 @@ const LANGUAGE_OPTIONS = [
   { value: 'en', label: 'English' },
   { value: 'fr', label: 'French' },
   { value: 'es', label: 'Spanish' },
-  { value: 'rw', label: 'Kinyarwanda' },
-  { value: 'sw', label: 'Swahili' },
-  { value: 'de', label: 'German' },
-  { value: 'it', label: 'Italian' },
-  { value: 'pt', label: 'Portuguese' },
-  { value: 'nl', label: 'Dutch' },
-  { value: 'ru', label: 'Russian' },
-  { value: 'uk', label: 'Ukrainian' },
-  { value: 'pl', label: 'Polish' },
-  { value: 'tr', label: 'Turkish' },
-  { value: 'ar', label: 'Arabic' },
-  { value: 'he', label: 'Hebrew' },
-  { value: 'fa', label: 'Persian' },
-  { value: 'hi', label: 'Hindi' },
-  { value: 'ur', label: 'Urdu' },
-  { value: 'bn', label: 'Bengali' },
-  { value: 'zh', label: 'Chinese (Simplified)' },
-  { value: 'ja', label: 'Japanese' },
-  { value: 'ko', label: 'Korean' },
-  { value: 'vi', label: 'Vietnamese' },
-  { value: 'th', label: 'Thai' },
-  { value: 'id', label: 'Indonesian' },
-  { value: 'ms', label: 'Malay' },
-  { value: 'tl', label: 'Filipino' },
-  { value: 'el', label: 'Greek' },
-  { value: 'sv', label: 'Swedish' },
-  { value: 'no', label: 'Norwegian' },
-  { value: 'da', label: 'Danish' },
-  { value: 'fi', label: 'Finnish' },
-  { value: 'cs', label: 'Czech' },
-  { value: 'ro', label: 'Romanian' },
-  { value: 'hu', label: 'Hungarian' },
-  { value: 'am', label: 'Amharic' },
-  { value: 'zu', label: 'Zulu' },
-  // Broader regional coverage — these ride the same Whisper auto-detect path
-  // as the languages above, so adding them here is what actually lets
-  // dictation and "Auto" recognize them (this list also gates which locales
-  // the pinned, single-language browser recognizer can be set to).
-  { value: 'af', label: 'Afrikaans' },
-  { value: 'sq', label: 'Albanian' },
-  { value: 'hy', label: 'Armenian' },
-  { value: 'az', label: 'Azerbaijani' },
-  { value: 'eu', label: 'Basque' },
-  { value: 'be', label: 'Belarusian' },
-  { value: 'bs', label: 'Bosnian' },
-  { value: 'bg', label: 'Bulgarian' },
-  { value: 'ca', label: 'Catalan' },
-  { value: 'hr', label: 'Croatian' },
-  { value: 'et', label: 'Estonian' },
-  { value: 'gl', label: 'Galician' },
-  { value: 'ka', label: 'Georgian' },
-  { value: 'is', label: 'Icelandic' },
-  { value: 'lv', label: 'Latvian' },
-  { value: 'lt', label: 'Lithuanian' },
-  { value: 'lb', label: 'Luxembourgish' },
-  { value: 'mk', label: 'Macedonian' },
-  { value: 'mt', label: 'Maltese' },
-  { value: 'sr', label: 'Serbian' },
-  { value: 'sk', label: 'Slovak' },
-  { value: 'sl', label: 'Slovenian' },
-  { value: 'cy', label: 'Welsh' },
-  { value: 'yi', label: 'Yiddish' },
-  { value: 'gu', label: 'Gujarati' },
-  { value: 'kn', label: 'Kannada' },
-  { value: 'ml', label: 'Malayalam' },
-  { value: 'mr', label: 'Marathi' },
-  { value: 'ne', label: 'Nepali' },
-  { value: 'pa', label: 'Punjabi' },
-  { value: 'ps', label: 'Pashto' },
-  { value: 'sd', label: 'Sindhi' },
-  { value: 'si', label: 'Sinhala' },
-  { value: 'ta', label: 'Tamil' },
-  { value: 'te', label: 'Telugu' },
-  { value: 'bo', label: 'Tibetan' },
-  { value: 'my', label: 'Burmese' },
-  { value: 'km', label: 'Khmer' },
-  { value: 'lo', label: 'Lao' },
-  { value: 'jw', label: 'Javanese' },
-  { value: 'su', label: 'Sundanese' },
-  { value: 'kk', label: 'Kazakh' },
-  { value: 'mn', label: 'Mongolian' },
-  { value: 'tg', label: 'Tajik' },
-  { value: 'tk', label: 'Turkmen' },
-  { value: 'uz', label: 'Uzbek' },
-  { value: 'ha', label: 'Hausa' },
-  { value: 'so', label: 'Somali' },
-  { value: 'sn', label: 'Shona' },
-  { value: 'yo', label: 'Yoruba' },
-  { value: 'mg', label: 'Malagasy' },
-  { value: 'mi', label: 'Maori' },
-  { value: 'ht', label: 'Haitian Creole' },
 ];
 const RECOGNITION_LANGUAGE_CODES = new Set(LANGUAGE_OPTIONS.map(o => o.value).filter(v => v !== 'auto'));
 
@@ -2319,6 +2255,8 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
   const [showProfile, setShowProfile] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [researchMode, setResearchMode] = useState(null); // null | 'web' | 'deep'
+  const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const workspace = useWebContainer();
   const [attachments, setAttachments] = useState([]);
   const [dismissedSuggestions, setDismissedSuggestions] = useState([]);
   const [editingAttachment, setEditingAttachment] = useState(null);
@@ -2762,6 +2700,10 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
 
   const composerDisabled = loading || connectionStatus !== 'online';
 
+  // Mirrors the server's own round cap (server.js's WORKSPACE_MAX_TOOL_ROUNDS)
+  // so a stuck loop stops locally instead of relying solely on a 400 from the server.
+  const WORKSPACE_MAX_TOOL_ROUNDS = 8;
+
   async function handleSubmit(e) {
     e.preventDefault();
     const text = input.trim();
@@ -2773,13 +2715,38 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
     setLoading(true);
 
     setTimeout(async () => {
+      const baseArgs = {temperature:settings.temperature, model:getModel(), deepResearch:researchMode==='deep', language:settings.language, personalization:getPersonalization(), history: toHistoryPayload(priorMessages), smart:!!settings.smartMode, attachments:userMsg.attachments, workspaceEnabled: workspaceOpen};
       try {
-        const { reply, sources, images } = await sendMessage(text, {temperature:settings.temperature, model:getModel(), deepResearch:researchMode==='deep', language:settings.language, personalization:getPersonalization(), history: toHistoryPayload(priorMessages), smart:!!settings.smartMode, attachments:userMsg.attachments});
-        setMessages(prev => [...prev, { role:"assistant", content:reply, sources, images, likes:0 }]);
-        if (settings.notifyResponses?.push && document.hidden && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-          new Notification('FigoAI replied', { body: reply.slice(0, 120), icon: '/logo-mark.png' });
+        let toolTurn = [];
+        let rounds = 0;
+        let result = await sendMessage(text, { ...baseArgs, toolTurn });
+        while (result.needsTool && rounds < WORKSPACE_MAX_TOOL_ROUNDS) {
+          rounds += 1;
+          const { assistantMessage } = result;
+          const toolResults = [];
+          for (const call of assistantMessage.tool_calls) {
+            const output = await workspace.runToolCall(call);
+            toolResults.push({ role: 'tool', tool_call_id: call.id, content: output });
+            setMessages(prev => [...prev, {
+              role: 'assistant', isToolStep: true, likes: 0,
+              toolName: call?.function?.name,
+              toolArgs: call?.function?.arguments,
+              toolOutput: output,
+            }]);
+          }
+          toolTurn = [...toolTurn, assistantMessage, ...toolResults];
+          result = await sendMessage(text, { ...baseArgs, toolTurn });
         }
-        if (settings.voiceEnabled) speakReply(reply, settings);
+        if (result.needsTool) {
+          setMessages(prev => [...prev, { role:"assistant", content: "That took more tool calls than I'll auto-run in one turn — let me know if you'd like me to keep going.", likes:0, isError:true }]);
+        } else {
+          const { reply, sources, images } = result;
+          setMessages(prev => [...prev, { role:"assistant", content:reply, sources, images, likes:0 }]);
+          if (settings.notifyResponses?.push && document.hidden && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+            new Notification('FigoAI replied', { body: reply.slice(0, 120), icon: '/logo-mark.png' });
+          }
+          if (settings.voiceEnabled) speakReply(reply, settings);
+        }
       } catch (err) {
         if (err.status === 401) { setLoading(false); return onLogout(); }
         setMessages(prev => [...prev, { role:"assistant", content: err.message || "Something went wrong. Please try again.", likes:0, isError:true }]);
@@ -2825,9 +2792,17 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
                 <button type="button" onClick={()=>{setActiveView('images'); setShowAttachMenu(false);}}><Icons.Image size={16}/> <span>Create image</span></button>
                 <button type="button" className={researchMode==='web'?'active':''} onClick={()=>toggleResearchMode('web')}><Icons.Globe size={16}/> <span>Web search</span> {researchMode==='web' && <Icons.Check size={13}/>}</button>
                 <button type="button" className={researchMode==='deep'?'active':''} onClick={()=>toggleResearchMode('deep')}><Icons.Sparkles size={16}/> <span>Deep research</span> {researchMode==='deep' && <Icons.Check size={13}/>}</button>
+                <button type="button" className={workspaceOpen?'active':''} onClick={()=>{setWorkspaceOpen(v=>!v); setShowAttachMenu(false);}}><Icons.Terminal size={16}/> <span>Workspace</span> {workspaceOpen && <Icons.Check size={13}/>}</button>
               </div>
             )}
           </div>
+          {workspaceOpen && (
+            <span className="research-chip">
+              <Icons.Terminal size={12}/>
+              Workspace
+              <button type="button" onClick={()=>setWorkspaceOpen(false)} title="Close Workspace"><Icons.X size={11}/></button>
+            </span>
+          )}
           {researchMode && (
             <span className="research-chip">
               {researchMode==='deep' ? <Icons.Sparkles size={12}/> : <Icons.Globe size={12}/>}
@@ -3062,6 +3037,7 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
           onOpenSettings={()=>setShowSettings(true)}
         />
       )}
+      {workspaceOpen && <WorkspacePanel workspace={workspace} onClose={()=>setWorkspaceOpen(false)}/>}
       {showProfile && <ProfilePanel user={user} onUpdate={onUpdateUser} onClose={()=>setShowProfile(false)}/>}
       {showSettings && <SettingsPanel settings={settings} onUpdate={setSettings} onClose={()=>setShowSettings(false)} user={user} onUpdateUser={onUpdateUser} onClearHistory={handleClearHistory} chats={chats} setChats={setChats} onOpenLibrary={openLibraryTab} onLogout={handleLogout}/>}
       {editingAttachment!=null && attachments[editingAttachment] && (
