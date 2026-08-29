@@ -101,6 +101,19 @@ async function initDb() {
     await pool.query("UPDATE users SET is_admin = TRUE WHERE LOWER(username) = ?", [seedAdminUsername]);
   }
 
+  // Super admin is a second tier above is_admin: a regular admin can see the
+  // full admin/super-admin list but can't promote or demote anyone — only a
+  // super admin can. Seeded onto ADMIN_USERNAME the first time this column is
+  // created (same bootstrap as is_admin above); every other super admin has
+  // to be granted directly in the database, there's no promote-to-super-admin
+  // UI, to keep that escalation path deliberately out of band.
+  const hadIsSuperAdminColumn = await columnExists("users", "is_super_admin");
+  await ensureColumn("users", "is_super_admin", "is_super_admin BOOLEAN NOT NULL DEFAULT FALSE");
+  if (!hadIsSuperAdminColumn) {
+    const seedAdminUsername = (process.env.ADMIN_USERNAME || "figobiziman").toLowerCase();
+    await pool.query("UPDATE users SET is_super_admin = TRUE, is_admin = TRUE WHERE LOWER(username) = ?", [seedAdminUsername]);
+  }
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS passkeys (
       id SERIAL PRIMARY KEY,
@@ -173,6 +186,26 @@ async function initDb() {
       CONSTRAINT fk_family_links_parent FOREIGN KEY (parent_user_id) REFERENCES users(id) ON DELETE CASCADE,
       CONSTRAINT fk_family_links_child FOREIGN KEY (child_user_id) REFERENCES users(id) ON DELETE CASCADE,
       CONSTRAINT uniq_family_pair UNIQUE (parent_user_id, child_user_id)
+    )
+  `);
+
+  // Chat history used to live only in each browser's localStorage — this
+  // mirrors it server-side so "Recents" follows the account across devices.
+  // client_id is the id the client already generates for a chat (Date.now());
+  // it's kept as-is rather than switching to a server-issued id so the
+  // client's chat shape doesn't need to change at all.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS chats (
+      id SERIAL PRIMARY KEY,
+      user_id INT NOT NULL,
+      client_id BIGINT NOT NULL,
+      title VARCHAR(255) NOT NULL DEFAULT 'New chat',
+      messages JSONB NOT NULL DEFAULT '[]',
+      archived BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT fk_chats_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      CONSTRAINT uniq_chats_user_client UNIQUE (user_id, client_id)
     )
   `);
 }

@@ -448,3 +448,40 @@ export async function removeAdminFamilyLink(id) {
   if (!res.ok) throw await parseError(res, 'Could not remove that link');
   return res.json();
 }
+
+export async function listChats() {
+  const res = await fetch(`${API_BASE}/chats`, {
+    headers: { Authorization: `Bearer ${getToken()}` },
+  });
+  if (!res.ok) throw await parseError(res, 'Could not load your chats');
+  const data = await res.json();
+  return data.chats;
+}
+
+export async function syncChats(chats) {
+  const res = await fetch(`${API_BASE}/chats`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+    body: JSON.stringify({ chats }),
+  });
+  if (!res.ok) throw await parseError(res, 'Could not sync your chats');
+  return res.json();
+}
+
+export async function deleteServerChat(id) {
+  const res = await fetch(`${API_BASE}/chats/${id}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${getToken()}` },
+  });
+  if (!res.ok) throw await parseError(res, 'Could not delete that chat');
+  return res.json();
+}
+
+export async function clearServerChats() {
+  const res = await fetch(`${API_BASE}/chats/clear`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${getToken()}` },
+  });
+  if (!res.ok) throw await parseError(res, 'Could not clear your chats');
+  return res.json();
+}

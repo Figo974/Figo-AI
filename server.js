@@ -18,6 +18,7 @@ const { createSession, registerSessionRoutes } = require("./sessions");
 const { registerAdvancedSecurityRoutes } = require("./advancedSecurity");
 const { registerFamilyRoutes } = require("./family");
 const { registerAdminRoutes } = require("./admin");
+const { registerChatRoutes } = require("./chats");
 const { sendPasswordResetEmail, sendPasswordChangedEmail, isEmailConfigured } = require("./mailer");
 
 console.log("Starting FigoAI server...");
@@ -335,7 +336,7 @@ app.post("/api/auth/register", async (req, res) => {
       [username, normalizedEmail, passwordHash, username]
     );
 
-    const user = { id: result.insertId, username, email: normalizedEmail, displayName: username, avatarUrl: null, advancedSecurityEnrolled: false, hasPassword: true, isAdmin: false };
+    const user = { id: result.insertId, username, email: normalizedEmail, displayName: username, avatarUrl: null, advancedSecurityEnrolled: false, hasPassword: true, isAdmin: false, isSuperAdmin: false };
     const { jti, expiresIn } = await createSession(pool, user.id, req);
     const token = signToken(user, jti, expiresIn);
 
@@ -356,7 +357,7 @@ app.post("/api/auth/login", async (req, res) => {
 
     const identifier = username.trim();
     const [rows] = await pool.query(
-      "SELECT id, username, email, password_hash, display_name, avatar_url, advanced_security_enrolled, is_admin FROM users WHERE username = ? OR email = ?",
+      "SELECT id, username, email, password_hash, display_name, avatar_url, advanced_security_enrolled, is_admin, is_super_admin FROM users WHERE username = ? OR email = ?",
       [identifier, identifier.toLowerCase()]
     );
     const row = rows[0];
@@ -372,7 +373,7 @@ app.post("/api/auth/login", async (req, res) => {
       });
     }
 
-    const user = { id: row.id, username: row.username, email: row.email, displayName: row.display_name, avatarUrl: row.avatar_url, advancedSecurityEnrolled: false, hasPassword: true, isAdmin: !!row.is_admin };
+    const user = { id: row.id, username: row.username, email: row.email, displayName: row.display_name, avatarUrl: row.avatar_url, advancedSecurityEnrolled: false, hasPassword: true, isAdmin: !!row.is_admin, isSuperAdmin: !!row.is_super_admin };
     const { jti, expiresIn } = await createSession(pool, user.id, req);
     const token = signToken(user, jti, expiresIn);
 
@@ -386,7 +387,7 @@ app.post("/api/auth/login", async (req, res) => {
 app.get("/api/auth/me", authenticate, async (req, res) => {
   try {
     const [rows] = await pool.query(
-      "SELECT id, username, email, display_name, avatar_url, advanced_security_enrolled, password_hash, is_admin FROM users WHERE id = ?",
+      "SELECT id, username, email, display_name, avatar_url, advanced_security_enrolled, password_hash, is_admin, is_super_admin FROM users WHERE id = ?",
       [req.user.id]
     );
     const row = rows[0];
@@ -404,6 +405,7 @@ app.get("/api/auth/me", authenticate, async (req, res) => {
         advancedSecurityEnrolled: !!row.advanced_security_enrolled,
         hasPassword: !!row.password_hash,
         isAdmin: !!row.is_admin,
+        isSuperAdmin: !!row.is_super_admin,
       },
     });
   } catch (error) {
@@ -666,6 +668,7 @@ registerSessionRoutes(app, { pool, authenticate });
 registerAdvancedSecurityRoutes(app, { pool, authenticate });
 registerFamilyRoutes(app, { pool, authenticate });
 registerAdminRoutes(app, { pool, authenticate, isEmailConfigured, model: MODEL, allowedModels: ALLOWED_MODELS });
+registerChatRoutes(app, { pool, authenticate });
 
 /*
 |--------------------------------------------------------------------------

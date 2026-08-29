@@ -107,7 +107,7 @@ function OverviewTab() {
   );
 }
 
-function UsersTab({ currentUserId }) {
+function UsersTab({ currentUserId, isSuperAdmin }) {
   const [users, setUsers] = useState(null);
   const [error, setError] = useState("");
   const [busyId, setBusyId] = useState(null);
@@ -164,14 +164,22 @@ function UsersTab({ currentUserId }) {
         return (
           <div className="account-row" key={u.id}>
             <span className="account-row__label" style={{ flexDirection: "column", alignItems: "flex-start", gap: 2 }}>
-              <span style={{ color: "#ececec", fontSize: 14 }}>{u.displayName || u.username} {u.isAdmin && <span className="admin-badge admin-badge--on">Admin</span>}</span>
+              <span style={{ color: "#ececec", fontSize: 14 }}>
+                {u.displayName || u.username}
+                {" "}
+                {u.isSuperAdmin && <span className="admin-badge admin-badge--on">Super Admin</span>}
+                {" "}
+                {u.isAdmin && !u.isSuperAdmin && <span className="admin-badge admin-badge--on">Admin</span>}
+              </span>
               <span>@{u.username} {u.email && `· ${u.email}`}</span>
               <span>Joined {formatDate(u.createdAt)} · {u.activeSessions} active session{u.activeSessions === 1 ? "" : "s"} · {u.passkeyCount} passkey{u.passkeyCount === 1 ? "" : "s"}{u.advancedSecurityEnrolled ? " · Advanced security on" : ""}</span>
             </span>
             <span style={{ display: "flex", gap: 8, flexShrink: 0 }}>
-              <button className="admin-outline-btn" disabled={busyId === u.id} onClick={() => handleToggleAdmin(u)} title={u.isAdmin ? "Remove admin access" : "Make admin"}>
-                <Icons.Shield size={14}/> {u.isAdmin ? "Remove admin" : "Make admin"}
-              </button>
+              {isSuperAdmin && (
+                <button className="admin-outline-btn" disabled={busyId === u.id} onClick={() => handleToggleAdmin(u)} title={u.isAdmin ? "Remove admin access" : "Make admin"}>
+                  <Icons.Shield size={14}/> {u.isAdmin ? "Remove admin" : "Make admin"}
+                </button>
+              )}
               {!isSelf && u.activeSessions > 0 && (
                 <button className="admin-danger-btn" disabled={busyId === u.id} onClick={() => handleBurn(u)} title="Log out everywhere"><Icons.Zap size={14}/> Burn</button>
               )}
@@ -333,7 +341,7 @@ export default function AdminView({ user }) {
         ))}
       </div>
       {tab === "overview" && <OverviewTab />}
-      {tab === "users" && <UsersTab currentUserId={user.id} />}
+      {tab === "users" && <UsersTab currentUserId={user.id} isSuperAdmin={!!user.isSuperAdmin} />}
       {tab === "passkeys" && <PasskeysTab />}
       {tab === "sessions" && <SessionsTab />}
       {tab === "family" && <FamilyTab />}

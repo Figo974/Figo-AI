@@ -23,6 +23,22 @@ function registerAdminRoutes(app, { pool, authenticate, isEmailConfigured, model
     }
   }
 
+  // Gates adding/removing admin access itself — a regular admin can see who's
+  // an admin or super admin (requireAdmin covers the list routes) but can't
+  // change it; only a super admin can promote or demote.
+  async function requireSuperAdmin(req, res, next) {
+    try {
+      const [rows] = await pool.query("SELECT is_super_admin FROM users WHERE id = ?", [req.user.id]);
+      if (!rows[0]?.is_super_admin) {
+        return res.status(403).json({ success: false, error: "Super admin access only" });
+      }
+      next();
+    } catch (error) {
+      console.error("Super admin check error:", error.message);
+      return res.status(500).json({ success: false, error: "Could not verify super admin access" });
+    }
+  }
+
   /*
   |--------------------------------------------------------------------------
   | Overview — headline counts + server/integration status
@@ -77,7 +93,7 @@ function registerAdminRoutes(app, { pool, authenticate, isEmailConfigured, model
     try {
       const [rows] = await pool.query(`
         SELECT u.id, u.username, u.email, u.display_name, u.created_at, u.password_hash,
-               u.advanced_security_enrolled, u.is_admin,
+               u.advanced_security_enrolled, u.is_admin, u.is_super_admin,
                (SELECT COUNT(*)::int FROM sessions s WHERE s.user_id = u.id AND s.revoked_at IS NULL) AS active_sessions,
                (SELECT COUNT(*)::int FROM passkeys pk WHERE pk.user_id = u.id) AS passkey_count
         FROM users u
@@ -96,6 +112,7 @@ function registerAdminRoutes(app, { pool, authenticate, isEmailConfigured, model
           activeSessions: row.active_sessions,
           passkeyCount: row.passkey_count,
           isAdmin: !!row.is_admin,
+          isSuperAdmin: !!row.is_super_admin,
         })),
       });
     } catch (error) {
@@ -137,7 +154,7 @@ function registerAdminRoutes(app, { pool, authenticate, isEmailConfigured, model
     }
   });
 
-  app.post("/api/admin/users/:id/promote", authenticate, requireAdmin, async (req, res) => {
+  app.post("/api/admin/users/:id/promote", authenticate, requireSuperAdmin, async (req, res) => {
     try {
       const [result] = await pool.query("UPDATE users SET is_admin = TRUE WHERE id = ?", [req.params.id]);
       if (result.affectedRows === 0) {
@@ -150,7 +167,7 @@ function registerAdminRoutes(app, { pool, authenticate, isEmailConfigured, model
     }
   });
 
-  app.post("/api/admin/users/:id/demote", authenticate, requireAdmin, async (req, res) => {
+  app.post("/api/admin/users/:id/demote", authenticate, requireSuperAdmin, async (req, res) => {
     try {
       const targetId = Number(req.params.id);
       if (targetId === req.user.id) {

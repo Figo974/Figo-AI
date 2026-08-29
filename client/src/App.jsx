@@ -6,6 +6,7 @@ import {
   enrollAdvancedSecurity, unenrollAdvancedSecurity,
   sendFamilyInvite, listFamily, cancelFamilyInvite, removeFamilyLink,
   updateUsername, updateDisplayName, updateAvatar, updateEmail, deleteAccount,
+  listChats, syncChats, deleteServerChat, clearServerChats,
 } from "./api.js";
 import { startRegistration, browserSupportsWebAuthn } from "@simplewebauthn/browser";
 import { Icons } from "./icons.jsx";
@@ -2352,6 +2353,41 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
   useEffect(() => { localStorage.setItem(chatsKey, JSON.stringify(chats)); }, [chats, chatsKey]);
   useEffect(() => { localStorage.setItem('figoai_settings', JSON.stringify(settings)); }, [settings]);
 
+  // "Recents" used to live only in this browser's localStorage — mirror it to
+  // the account server-side so it follows the user across devices. On mount,
+  // pull the server's copy and merge it with whatever's cached locally
+  // (last-write-wins per chat, by updatedAt/createdAt), then push that merged
+  // result back up so any local-only history from before this existed gets
+  // carried onto the server too. Only start pushing subsequent changes once
+  // that initial merge actually succeeds, so a failed/offline load can't
+  // clobber the server with an incomplete local list.
+  const chatsSyncedRef = useRef(false);
+  useEffect(() => {
+    listChats().then((serverChats) => {
+      let merged;
+      setChats((prev) => {
+        const byId = new Map(prev.map(c => [c.id, c]));
+        for (const serverChat of serverChats) {
+          const local = byId.get(serverChat.id);
+          const serverTime = new Date(serverChat.updatedAt || serverChat.createdAt || 0).getTime();
+          const localTime = local ? new Date(local.updatedAt || local.createdAt || 0).getTime() : -1;
+          if (!local || serverTime >= localTime) byId.set(serverChat.id, serverChat);
+        }
+        merged = [...byId.values()].sort((a, b) => new Date(b.updatedAt||b.createdAt) - new Date(a.updatedAt||a.createdAt));
+        return merged;
+      });
+      chatsSyncedRef.current = true;
+      if (merged) syncChats(merged).catch(() => {});
+    }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!chatsSyncedRef.current) return;
+    const t = setTimeout(() => { syncChats(chats).catch(() => {}); }, 1200);
+    return () => clearTimeout(t);
+  }, [chats]);
+
   // Auto-save current conversation
   useEffect(() => {
     if (activeChat && messages.length > 0) {
@@ -2591,6 +2627,7 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
   const deleteChat = (chatId) => {
     setChats(prev => prev.filter(c => c.id !== chatId));
     if(activeChat === chatId) { setActiveChat(null); setMessages([]); setAttachments([]); }
+    deleteServerChat(chatId).catch(() => {});
   };
 
   const handleDeleteWithConfirm = (chat) => setDeleteTarget(chat);
@@ -2625,6 +2662,7 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
     setActiveChat(null);
     setMessages([]);
     setAttachments([]);
+    clearServerChats().catch(() => {});
   };
 
   const openLibraryTab = (tab) => {
