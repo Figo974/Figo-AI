@@ -1,7 +1,7 @@
 {
   "name": "figoai-server",
   "private": true,
-  "description": "FigoAI backend — Express API for Groq-powered chat with PostgreSQL-backed user accounts",
+  "description": "FigoAI backend — Express API for OpenRouter chat, Groq voice, and PostgreSQL-backed user accounts",
   "engines": {
     "node": ">=18.0.0"
   },

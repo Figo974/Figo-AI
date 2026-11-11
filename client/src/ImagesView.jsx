@@ -90,7 +90,7 @@ export default function ImagesView({ user }) {
         <input
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          placeholder="Describe a new image"
+          placeholder="Describe the visual you have in mind"
           disabled={generating}
         />
         <button type="submit" className="image-prompt-bar__submit" disabled={generating || !prompt.trim()} title="Generate">
@@ -99,7 +99,7 @@ export default function ImagesView({ user }) {
       </form>
       {error && <p className="images-error">{error}</p>}
 
-      <h2 className="view-subtitle">Create an image</h2>
+      <h2 className="view-subtitle">Image styles</h2>
       <div className="style-grid">
         {STYLE_PRESETS.map((s) => (
           <button key={s.label} className="style-card" onClick={() => applyStyle(s.suffix)} disabled={generating}>

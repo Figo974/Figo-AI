@@ -4,3 +4,8 @@ client/node_modules/
 .env
 client/.env
 client_secret_*.json
+
+.env.*
+!.env.example
+client/.env.*
+!client/.env.example

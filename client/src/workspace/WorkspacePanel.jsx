@@ -29,7 +29,9 @@ function FileTreeNode({ node, activePath, onSelect, depth }) {
 }
 
 export default function WorkspacePanel({ workspace, onClose }) {
-  const { status, tree, boot, attachTerminal, readFile, writeFile } = workspace;
+  const { status, tree, boot, attachTerminal, readFile, writeFile, createZip, zipDownload } = workspace;
+  const [zipBusy, setZipBusy] = useState(false);
+  const [zipError, setZipError] = useState('');
   const [activePath, setActivePath] = useState(null);
   const [fileContent, setFileContent] = useState('');
   const [dirty, setDirty] = useState(false);
@@ -83,12 +85,34 @@ export default function WorkspacePanel({ workspace, onClose }) {
     setDirty(false);
   };
 
+  const handleCreateZip = async () => {
+    setZipBusy(true);
+    setZipError('');
+    try {
+      if (dirty && activePath) {
+        await writeFile(activePath, fileContent);
+        setDirty(false);
+      }
+      await createZip('/');
+    } catch (error) {
+      setZipError(error?.message || 'Could not create ZIP archive.');
+    } finally {
+      setZipBusy(false);
+    }
+  };
+
   return (
     <div className="workspace-panel">
       <div className="workspace-panel__header">
         <span><Icons.Terminal size={15} /> Workspace</span>
-        <button type="button" className="action-btn" onClick={onClose} title="Close Workspace"><Icons.X size={15} /></button>
+        <div className="workspace-panel__header-actions">
+          {status === 'ready' && <button type="button" className="workspace-zip-btn" onClick={handleCreateZip} disabled={zipBusy}>{zipBusy ? 'Preparing…' : 'Create ZIP'}</button>}
+          {zipDownload && <a className="workspace-zip-btn workspace-zip-btn--download" href={zipDownload.url} download={zipDownload.fileName}>Download ZIP</a>}
+          <button type="button" className="action-btn" onClick={onClose} title="Close Workspace"><Icons.X size={15} /></button>
+        </div>
       </div>
+      {zipDownload && <div className="workspace-zip-expiry">{zipDownload.fileName} · {zipDownload.fileCount} files · Download link expires at {new Date(zipDownload.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (2 hours)</div>}
+      {zipError && <div className="workspace-zip-error" role="alert">{zipError}</div>}
 
       {status !== 'ready' ? (
         <div className="workspace-panel__boot">

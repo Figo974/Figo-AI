@@ -5,6 +5,7 @@
 
 function registerChatRoutes(app, { pool, authenticate }) {
   app.get("/api/chats", authenticate, async (req, res) => {
+    if (req.user.isGuest) return res.json({ success: true, chats: [] });
     try {
       const [rows] = await pool.query(
         "SELECT client_id, title, messages, archived, created_at, updated_at FROM chats WHERE user_id = ? ORDER BY updated_at DESC",
@@ -31,6 +32,7 @@ function registerChatRoutes(app, { pool, authenticate }) {
   // list is removed through the explicit routes below instead, so a bug in
   // this bulk sync can't silently wipe someone's history.
   app.put("/api/chats", authenticate, async (req, res) => {
+    if (req.user.isGuest) return res.json({ success: true });
     try {
       const chats = Array.isArray(req.body?.chats) ? req.body.chats : [];
       for (const chat of chats) {
@@ -58,6 +60,7 @@ function registerChatRoutes(app, { pool, authenticate }) {
   });
 
   app.delete("/api/chats/:clientId", authenticate, async (req, res) => {
+    if (req.user.isGuest) return res.json({ success: true });
     try {
       await pool.query("DELETE FROM chats WHERE user_id = ? AND client_id = ?", [req.user.id, req.params.clientId]);
       return res.json({ success: true });
@@ -68,6 +71,7 @@ function registerChatRoutes(app, { pool, authenticate }) {
   });
 
   app.post("/api/chats/clear", authenticate, async (req, res) => {
+    if (req.user.isGuest) return res.json({ success: true });
     try {
       await pool.query("DELETE FROM chats WHERE user_id = ?", [req.user.id]);
       return res.json({ success: true });

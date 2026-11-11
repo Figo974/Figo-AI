@@ -617,3 +617,52 @@
 .family-invite__continue {
   margin-top: 20px;
 }
+
+
+/* Minimal Google / guest sign-in screen matching the supplied reference. */
+.login-container.dark { background: #303030; }
+.login-container.dark::before { display: none; }
+.login-card.login-card--simple {
+  width: min(100%, 650px);
+  max-width: 650px;
+  padding: 42px 44px 38px;
+  background: #303030;
+  border: 0;
+  border-radius: 18px;
+  box-shadow: none;
+  backdrop-filter: none;
+  color: #fff;
+  text-align: center;
+  animation: none;
+}
+.login-card__close {
+  position: absolute; top: 20px; right: 22px;
+  border: 0; background: transparent; color: #fff;
+  font-size: 30px; line-height: 1; cursor: pointer;
+}
+.login-card__simple-heading { font-size: 36px; font-weight: 400; line-height: 1.2; margin: 0 0 24px; }
+.login-card__simple-subtitle {
+  color: #fff; font-size: 22px; line-height: 1.5;
+  max-width: 520px; margin: 0 auto 40px;
+}
+.login-card--simple .login-card__social { margin: 0 0 26px; }
+.login-card--simple .social-btn {
+  min-height: 72px; border-radius: 999px; font-size: 21px;
+  font-weight: 600; border: 1px solid #555; background: #303030; color: #fff;
+}
+.login-card--simple .social-btn--google:hover { background: #3a3a3a; }
+.login-card__simple-divider { display: flex; align-items: center; gap: 26px; color: #ddd; font-size: 18px; margin: 28px 0 22px; }
+.login-card__simple-divider::before, .login-card__simple-divider::after { content: ""; height: 1px; background: #555; flex: 1; }
+.login-card__guest {
+  width: 100%; min-height: 68px; border-radius: 999px;
+  border: 0; background: #fff; color: #111; font-size: 20px;
+  font-weight: 600; cursor: pointer;
+}
+.login-card__guest:disabled { opacity: .65; cursor: wait; }
+.login-card__guest-note { color: #c7c7c7; font-size: 14px; line-height: 1.5; margin: 18px 8px 0; }
+@media (max-width: 600px) {
+  .login-card.login-card--simple { padding: 54px 22px 30px; }
+  .login-card__simple-heading { font-size: 30px; }
+  .login-card__simple-subtitle { font-size: 18px; margin-bottom: 30px; }
+  .login-card--simple .social-btn { min-height: 62px; font-size: 17px; }
+}

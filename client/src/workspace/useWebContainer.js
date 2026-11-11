@@ -1,5 +1,6 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { WebContainer } from '@webcontainer/api';
+import { createWorkspaceZip } from './zip.js';
 
 // WebContainer.boot() may only run once per page load — share a single
 // instance across every component/hook call instead of re-booting per chat.
@@ -72,8 +73,14 @@ async function runToCompletion(instance, command, onChunk) {
 export function useWebContainer() {
   const [status, setStatus] = useState('idle'); // idle | booting | ready | error
   const [tree, setTree] = useState([]);
+  const [zipDownload, setZipDownload] = useState(null);
+  const zipExpiryTimerRef = useRef(null);
   const instanceRef = useRef(null);
   const shellRef = useRef(null); // the persistent interactive jsh process, once a terminal attaches
+
+  useEffect(() => () => {
+    if (zipExpiryTimerRef.current) window.clearTimeout(zipExpiryTimerRef.current);
+  }, []);
 
   const refreshTree = useCallback(async () => {
     if (!instanceRef.current) return;
@@ -126,6 +133,33 @@ export function useWebContainer() {
     await refreshTree();
   }, [boot, refreshTree]);
 
+  const createZip = useCallback(async (folderPath = '/') => {
+    const instance = instanceRef.current || (await boot());
+    const archive = await createWorkspaceZip(instance, folderPath);
+    const token = localStorage.getItem('figoai_token') || '';
+    const upload = await fetch('/api/workspace/zip', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/zip',
+        'X-Archive-Name': encodeURIComponent(archive.fileName),
+      },
+      body: archive.blob,
+    });
+    const uploadResult = await upload.json().catch(() => ({}));
+    if (!upload.ok || !uploadResult.downloadUrl) {
+      throw new Error(uploadResult.error || 'The server could not store this ZIP. Check that the server is online and try again.');
+    }
+    if (zipExpiryTimerRef.current) window.clearTimeout(zipExpiryTimerRef.current);
+    const expiresAt = Number(uploadResult.expiresAt) || Date.now() + (2 * 60 * 60 * 1000);
+    const url = uploadResult.downloadUrl;
+    setZipDownload({ url, fileName: archive.fileName, fileCount: archive.fileCount, expiresAt });
+    zipExpiryTimerRef.current = window.setTimeout(() => {
+      setZipDownload((current) => current?.url === url ? null : current);
+    }, Math.max(0, expiresAt - Date.now()));
+    return { ...archive, downloadUrl: url, expiresAt };
+  }, [boot]);
+
   const runCommand = useCallback(async (command) => {
     const instance = instanceRef.current || (await boot());
     const result = await runToCompletion(instance, command);
@@ -154,6 +188,10 @@ export function useWebContainer() {
         const lines = flattenForToolResult(nodes);
         return lines.length ? lines.join('\n') : '(empty)';
       }
+      if (name === 'zip_folder') {
+        const archive = await createZip(args.path || '/');
+        return `Created ${archive.fileName} with ${archive.fileCount} files. Its download link is now available in the Workspace panel for two hours. Sensitive .env and key files are excluded.`;
+      }
       if (name === 'run_command') {
         const { output, exitCode } = await runCommand(args.command);
         return `$ ${args.command}\n${output}\n(exit code ${exitCode})`;
@@ -162,7 +200,7 @@ export function useWebContainer() {
     } catch (err) {
       return `Error: ${err?.message || String(err)}`;
     }
-  }, [readFile, writeFile, runCommand, boot]);
+  }, [readFile, writeFile, runCommand, boot, createZip]);
 
-  return { status, tree, boot, attachTerminal, readFile, writeFile, runCommand, runToolCall };
+  return { status, tree, boot, attachTerminal, readFile, writeFile, runCommand, runToolCall, createZip, zipDownload };
 }

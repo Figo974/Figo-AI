@@ -36,7 +36,7 @@ function verifyPassword(password, hash) {
 // waiting for the token to expire on its own. Older tokens issued before this
 // existed simply have no jti, and skip that check below.
 function signToken(user, jti, expiresIn) {
-  return jwt.sign({ sub: user.id, username: user.username, jti }, JWT_SECRET, {
+  return jwt.sign({ sub: user.id, username: user.username, jti, guest: !!user.isGuest }, JWT_SECRET, {
     expiresIn: expiresIn || JWT_EXPIRES_IN,
   });
 }
@@ -59,7 +59,7 @@ async function authenticate(req, res, next) {
       }
     }
 
-    req.user = { id: payload.sub, username: payload.username };
+    req.user = { id: payload.sub, username: payload.username, isGuest: !!payload.guest };
     req.sessionJti = payload.jti;
     next();
   } catch {

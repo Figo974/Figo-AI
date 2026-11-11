@@ -1,0 +1,21 @@
+{
+  "chat_records": 55668,
+  "instruction_records": 15011,
+  "question_answer_records": 0,
+  "indexed_documents": 70679,
+  "indexed_sources": [
+    "dolly_15k",
+    "oasst1"
+  ],
+  "raw_dataset_folders_present": [
+    "oasst1",
+    "dolly_15k",
+    "squad",
+    "no_robots",
+    "alpaca"
+  ],
+  "note": "The current live index is built from normalized OASST1 and Dolly examples. Install knowledge/requirements.txt, run knowledge/scripts/process_datasets.py, then run knowledge/scripts/build_index.py to include SQuAD, No Robots, and Alpaca records.",
+  "index_stale": false,
+  "index_format": "figoai-lexical-index-v2",
+  "index_bytes": 36985258
+}

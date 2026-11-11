@@ -145,6 +145,13 @@ export default function Router() {
     return () => window.removeEventListener("hashchange", handleHashChange);
   }, []);
 
+  const handleGuest = useCallback(({ token, user: guestUser }) => {
+    setToken(token);
+    const guestProfile = { ...guestUser, isGuest: true, displayName: "Guest" };
+    localStorage.setItem(USER_KEY, JSON.stringify(guestProfile));
+    setUser(guestProfile);
+  }, []);
+
   const handleLogin = useCallback(({ token, user: authUser }) => {
     setToken(token);
     const fullUser = buildProfile(authUser, null);
@@ -200,11 +207,11 @@ export default function Router() {
   if (!checked) return null;
 
   if (resetToken) {
-    return <Login onLogin={handleLogin} resetToken={resetToken} onResetDone={() => setResetToken(null)} />;
+    return <Login onLogin={handleLogin} onGuest={handleGuest} />;
   }
 
   if (!user || addingAccount) {
-    return <Login onLogin={handleLogin} oauthError={oauthError} onCancel={user ? () => setAddingAccount(false) : undefined} />;
+    return <Login onLogin={handleLogin} onGuest={handleGuest} oauthError={oauthError} onCancel={user ? () => setAddingAccount(false) : undefined} />;
   }
 
   if (familyInviteToken) {

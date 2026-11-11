@@ -303,7 +303,7 @@ function UserMenu({ user, accounts, onSwitchAccount, onProfile, onSettings, onAd
       <button onClick={onProfile}><Icons.User size={16}/> Profile</button>
       <button onClick={onSettings}><Icons.Settings size={16}/> Settings</button>
       {user.isAdmin && <button onClick={onAdmin}><Icons.Shield size={16}/> Admin dashboard</button>}
-      <button onClick={onAddAccount}><Icons.Plus size={16}/> Add account</button>
+      <button onClick={onAddAccount}><Icons.Plus size={16}/> {user?.isGuest ? "Log in for better answers" : "Add account"}</button>
       <div className="user-menu__divider"></div>
       <button className="user-menu__logout" onClick={onLogout}><Icons.Logout size={16}/> Log out</button>
     </div>
@@ -2115,7 +2115,7 @@ function DragDropOverlay({ onFiles }) {
 }
 
 const HEALTH_POLL_MS = 15000;
-const SMART_MODEL = 'openai/gpt-oss-120b';
+const SMART_MODEL = 'google/gemini-2.5-flash';
 const DEFAULT_ACCENT = '#a1a1aa';
 const CONTRAST_OPTIONS = [
   { value: 'standard', label: 'Standard' },
@@ -2135,6 +2135,7 @@ const LANGUAGE_OPTIONS = [
   { value: 'en', label: 'English' },
   { value: 'fr', label: 'French' },
   { value: 'es', label: 'Spanish' },
+  { value: 'rw', label: 'Kinyarwanda' },
 ];
 const RECOGNITION_LANGUAGE_CODES = new Set(LANGUAGE_OPTIONS.map(o => o.value).filter(v => v !== 'auto'));
 
@@ -2189,10 +2190,8 @@ const DEGREE_OPTIONS = [
   { value: 'less', label: 'Less' },
 ];
 const MODEL_OPTIONS = [
-  { value: 'openai/gpt-oss-120b', label: 'Recommended' },
-  { value: 'openai/gpt-oss-20b', label: 'Fastest' },
-  { value: 'groq/compound', label: 'Web Search' },
-  { value: 'groq/compound-mini', label: 'Web Search (Faster)' },
+  { value: 'google/gemini-2.5-flash', label: 'Gemini — General questions' },
+  { value: 'anthropic/claude-sonnet-4', label: 'Claude — Coding' },
 ];
 const SPEED_OPTIONS = [
   { value: 0.8, label: 'Slow' },
@@ -2230,14 +2229,41 @@ function stripForSpeech(text) {
     .trim();
 }
 
-function speakReply(text, settings) {
-  if (typeof window === 'undefined' || !window.speechSynthesis) return;
+async function speakReply(text, settings) {
   const clean = stripForSpeech(text);
   if (!clean) return;
+  if (typeof window === 'undefined' || !window.speechSynthesis) return;
   window.speechSynthesis.cancel();
+
+  const selectedLanguage = settings.language || 'auto';
+  const browserLocale = ({ rw: 'rw-RW', es: 'es-ES', fr: 'fr-FR' })[selectedLanguage] || null;
+  if (!browserLocale) {
+    try {
+      const response = await fetch('/api/voice/speak', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('figoai_token') || ''}` },
+        body: JSON.stringify({ text: clean }),
+      });
+      if (response.ok) {
+        const audioUrl = URL.createObjectURL(await response.blob());
+        const audio = new Audio(audioUrl);
+        audio.onended = () => URL.revokeObjectURL(audioUrl);
+        await audio.play();
+        return;
+      }
+    } catch (error) {
+      console.warn('Groq voice output unavailable; using browser speech:', error.message);
+    }
+  }
+
+  const voices = window.speechSynthesis.getVoices();
+  const matchingVoice = browserLocale
+    ? voices.find(v => (v.lang || '').toLowerCase().startsWith(selectedLanguage))
+    : null;
+  const preferredVoice = settings.voiceURI ? voices.find(v => v.voiceURI === settings.voiceURI) : null;
   const utterance = new SpeechSynthesisUtterance(clean);
-  const voice = window.speechSynthesis.getVoices().find(v => v.voiceURI === settings.voiceURI);
-  if (voice) utterance.voice = voice;
+  utterance.lang = browserLocale || preferredVoice?.lang || 'en-US';
+  utterance.voice = matchingVoice || preferredVoice || null;
   utterance.rate = settings.voiceRate || 1;
   window.speechSynthesis.speak(utterance);
 }
@@ -2248,7 +2274,7 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [model, setModel] = useState('openai/gpt-oss-120b');
+  const [model, setModel] = useState('');
   const [connectionStatus, setConnectionStatus] = useState('connecting'); // 'connecting' | 'online' | 'offline'
   const [sidebarOpen, setSidebarOpen] = useState(() => typeof window === 'undefined' || window.innerWidth > 768);
   const [showEmoji, setShowEmoji] = useState(false);
@@ -2264,7 +2290,7 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
   const [settings, setSettings] = useState(() => {
     const saved = localStorage.getItem('figoai_settings');
     const parsed = saved ? JSON.parse(saved) : {
-      model: 'openai/gpt-oss-120b', temperature: 0.7,
+      model: 'google/gemini-2.5-flash', temperature: 0.7,
       notifyResponses: { push: false }, notifySecurity: { email: false },
       contrast: 'standard', accentColor: DEFAULT_ACCENT, language: 'auto', smartMode: false, dictationEnabled: true,
       tone: 'default', traits: { warmth: 'default', enthusiasm: 'default', formatting: 'default', emoji: 'default' },
@@ -2472,8 +2498,8 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
       // browser lacks SpeechRecognition) is honored as-is — auto-detect only
       // applies when they left it on "Auto".
       const pinnedLanguage = (settings.language && settings.language !== 'auto') ? settings.language : null;
-      let languageHint = pinnedLanguage;
-      setVoiceHint('');
+      let languageHint = pinnedLanguage === 'rw' ? null : pinnedLanguage;
+      setVoiceHint(pinnedLanguage === 'rw' ? 'Kinyarwanda transcription is best-effort with the current voice service; text input is more reliable.' : '');
 
       const transcribeSoFar = async () => {
         if (!chunks.length) return;
@@ -2585,7 +2611,10 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
       // languages — it doesn't know Kinyarwanda, for one. Rather than just
       // fail, fall back to the Whisper path, which transcribes any language
       // server-side without needing browser-level language support.
-      if (e.error === 'language-not-supported') { startWhisperRecording(); return; }
+      if (e.error === 'language-not-supported') {
+        if (settings.language === 'rw') setVoiceHint('This browser has no Kinyarwanda speech recognizer. Trying automatic transcription; results may be limited.');
+        startWhisperRecording(); return;
+      }
       setVoiceError(VOICE_ERROR_MESSAGES[e.error] || `Voice input failed (${e.error}). Try again.`);
     };
     window.speechRecognition = r;
@@ -2677,7 +2706,7 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
   const getModel = () => {
     if (researchMode) return settings.model;
     if (settings.smartMode) return SMART_MODEL;
-    if (settings.defaultWebSearch) return 'groq/compound-mini';
+    if (settings.defaultWebSearch) return settings.model;
     return settings.model;
   };
 
@@ -2694,7 +2723,7 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
   const toggleResearchMode = (mode) => {
     setResearchMode(prev => {
       const next = prev === mode ? null : mode;
-      const nextModel = next === 'deep' ? 'groq/compound' : next === 'web' ? 'groq/compound-mini' : SMART_MODEL;
+      const nextModel = SMART_MODEL;
       setSettings(s => ({ ...s, model: nextModel }));
       return next;
     });
@@ -2827,7 +2856,6 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
               <div className="composer-menu">
                 <button type="button" onClick={()=>{fileInputRef.current?.click(); setShowAttachMenu(false);}}><Icons.Paperclip size={16}/> <span>Add photos & files</span></button>
                 <button type="button" onClick={()=>{setActiveView('library'); setShowAttachMenu(false);}}><Icons.Library size={16}/> <span>Add from library</span></button>
-                <button type="button" onClick={()=>{setActiveView('images'); setShowAttachMenu(false);}}><Icons.Image size={16}/> <span>Create image</span></button>
                 <button type="button" className={researchMode==='web'?'active':''} onClick={()=>toggleResearchMode('web')}><Icons.Globe size={16}/> <span>Web search</span> {researchMode==='web' && <Icons.Check size={13}/>}</button>
                 <button type="button" className={researchMode==='deep'?'active':''} onClick={()=>toggleResearchMode('deep')}><Icons.Sparkles size={16}/> <span>Deep research</span> {researchMode==='deep' && <Icons.Check size={13}/>}</button>
                 <button type="button" className={workspaceOpen?'active':''} onClick={()=>{setWorkspaceOpen(v=>!v); setShowAttachMenu(false);}}><Icons.Terminal size={16}/> <span>Workspace</span> {workspaceOpen && <Icons.Check size={13}/>}</button>
@@ -3009,16 +3037,7 @@ export default function App({ user, accounts, onLogout, onUpdateUser, onAddAccou
                   <h1>Ready when you are, {user.displayName||user.username}</h1>
                   <div className="welcome__composer">{renderComposer()}</div>
                   <p className="input-hint">Figo AI can make mistakes. Check important info.</p>
-                  <div className="welcome__suggestions">
-                    {[{icon:<Icons.Image/>,text:"Create an image"},{icon:<Icons.EditCircle/>,text:"Write or edit"}]
-                      .filter(s => !dismissedSuggestions.includes(s.text))
-                      .map((s,i)=>(
-                        <div key={i} className="suggestion-link">
-                          <button className="suggestion-link__body" onClick={()=>{setInput(s.text);inputRef.current?.focus();}}>{s.icon} <span>{s.text}</span></button>
-                          <button className="suggestion-link__dismiss" onClick={(e)=>{e.stopPropagation();setDismissedSuggestions(prev=>[...prev,s.text]);}} title="Dismiss"><Icons.X size={14}/></button>
-                        </div>
-                    ))}
-                  </div>
+
                 </div>
               ) : (
                 <div className="messages">

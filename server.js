@@ -3,6 +3,7 @@ require("dotenv").config({ quiet: true });
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
 const express = require("express");
 const axios = require("axios");
 const cors = require("cors");
@@ -24,6 +25,7 @@ const { sendPasswordResetEmail, sendPasswordChangedEmail, isEmailConfigured } = 
 console.log("Starting FigoAI server...");
 
 const app = express();
+app.set("trust proxy", 1);
 
 app.use(cors());
 // Default express.json() limit (100kb) is way too small for base64 voice
@@ -65,33 +67,59 @@ function ensureDbReady() {
 app.use((req, res, next) => { ensureDbReady().then(() => next()); });
 
 const PORT = process.env.PORT || 3000;
+const ZIP_LINK_TTL_MS = 2 * 60 * 60 * 1000;
+const ZIP_ARCHIVE_DIR = path.join(os.tmpdir(), "figoai-zip-archives");
+const zipArchives = new Map();
+fs.mkdirSync(ZIP_ARCHIVE_DIR, { recursive: true });
+// A process restart invalidates in-memory download tokens, so remove any
+// orphaned temporary archives left behind by the previous process.
+for (const filename of fs.readdirSync(ZIP_ARCHIVE_DIR)) {
+  if (/^[a-f0-9]{48}\.zip$/.test(filename)) {
+    try { fs.rmSync(path.join(ZIP_ARCHIVE_DIR, filename), { force: true }); } catch { /* best-effort cleanup */ }
+  }
+}
 
-const AI_URL = "https://api.groq.com/openai/v1/chat/completions";
+function removeExpiredZipArchives() {
+  const now = Date.now();
+  for (const [id, archive] of zipArchives) {
+    if (archive.expiresAt <= now) {
+      try { fs.rmSync(archive.filePath, { force: true }); } catch { /* best-effort cleanup */ }
+      zipArchives.delete(id);
+    }
+  }
+}
+const zipCleanupTimer = setInterval(removeExpiredZipArchives, 5 * 60 * 1000);
+zipCleanupTimer.unref?.();
+
+const AI_URL = "https://openrouter.ai/api/v1/chat/completions";
 const VOICE_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
-const AI_API_KEY = process.env.GROQ_API_KEY;
+const AI_API_KEY = process.env.OPENROUTER_API_KEY;
 // groq/compound gives real web-search-grounded answers, but its free-tier token
 // budget is small and shared across all compound calls, so it's opt-in rather
 // than the default — the default model always answers reliably, if not live.
 // A separate key for it (falling back to the main one) keeps that shared,
 // easily-exhausted budget from competing with normal chat traffic.
-const SEARCH_API_KEY = process.env.GROQ_SEARCH_API_KEY || AI_API_KEY;
-const VOICE_API_KEY = process.env.GROQ_VOICE_API_KEY || AI_API_KEY;
-const MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
-const ALLOWED_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "groq/compound", "groq/compound-mini"];
+const SEARCH_API_KEY = AI_API_KEY;
+const VOICE_API_KEY = process.env.GROQ_VOICE_API_KEY || process.env.GROQ_API_KEY;
+const TTS_API_KEY = process.env.GROQ_TTS_API_KEY || process.env.GROQ_API_KEY || VOICE_API_KEY;
+const MODEL = process.env.OPENROUTER_GENERAL_MODEL || "google/gemini-2.5-flash";
+const CODING_MODEL = process.env.OPENROUTER_CODING_MODEL || "anthropic/claude-sonnet-4";
+const OPENROUTER_TITLE_MODEL = process.env.OPENROUTER_TITLE_MODEL || MODEL;
+const ALLOWED_MODELS = [MODEL, CODING_MODEL];
 // The gpt-oss/compound models are all text-only (per Groq's own model
 // metadata) — this is the one model in Groq's lineup that actually accepts
 // image input, so any message with an image attachment gets routed here
 // automatically instead of whatever text model was otherwise selected.
-const VISION_MODEL = "qwen/qwen3.8-27b";
+const VISION_MODEL = MODEL;
 // "auto" (or anything unset/unrecognized) means no override — the model replies in whatever
 // language the user wrote in, which is its normal default behavior. Keys must
 // match client/src/App.jsx's LANGUAGE_OPTIONS.
 const LANGUAGE_NAMES = {
-  en: "English", fr: "French", es: "Spanish",
+  en: "English", fr: "French", es: "Spanish", rw: "Kinyarwanda",
 };
 
 if (!AI_API_KEY) {
-  console.error("Missing GROQ_API_KEY. Set it in a .env file (get a free key at https://console.groq.com/keys).");
+  console.error("Missing OPENROUTER_API_KEY. Set it in your .env file.");
   // Only actually kill the process for a direct run (local/Render) — this
   // file also gets required as a module by api/index.js on Vercel, where
   // process.exit() would kill the whole serverless function invocation
@@ -177,6 +205,19 @@ const WORKSPACE_TOOLS = [
         type: "object",
         properties: {
           path: { type: "string", description: "Directory to list, relative to the workspace root. Defaults to the root." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "zip_folder",
+      description: "Create a ZIP archive of a folder in the user's sandboxed workspace. The archive appears as a download link in the Workspace panel for two hours. Do not include .env files, private keys, or credentials.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Folder path relative to the workspace root. Use '/' for the complete project." },
         },
       },
     },
@@ -294,11 +335,81 @@ app.get("/api/health", (req, res) => {
   });
 });
 
+
+/*
+|--------------------------------------------------------------------------
+| Temporary ZIP downloads — links expire after two hours
+|--------------------------------------------------------------------------
+*/
+app.post("/api/workspace/zip", authenticate, express.raw({ type: "application/zip", limit: "105mb" }), (req, res) => {
+  try {
+    if (!Buffer.isBuffer(req.body) || req.body.length < 22) {
+      return res.status(400).json({ success: false, error: "Upload a valid ZIP archive." });
+    }
+    // Validate the ZIP end-of-central-directory signature before storing it.
+    const signature = req.body.readUInt32LE(req.body.length - 22);
+    if (signature !== 0x06054b50) {
+      return res.status(400).json({ success: false, error: "The uploaded archive is not a valid ZIP file." });
+    }
+    removeExpiredZipArchives();
+    const userArchives = [...zipArchives.entries()]
+      .filter(([, item]) => item.userId === req.user.id)
+      .sort((a, b) => a[1].createdAt - b[1].createdAt);
+    while (userArchives.length >= 5) {
+      const [oldId, oldest] = userArchives.shift();
+      try { fs.rmSync(oldest.filePath, { force: true }); } catch { /* best-effort cleanup */ }
+      zipArchives.delete(oldId);
+    }
+    if (zipArchives.size >= 1000) {
+      return res.status(429).json({ success: false, error: "The temporary download service is busy. Try again later." });
+    }
+    const id = crypto.randomBytes(24).toString("hex");
+    const filePath = path.join(ZIP_ARCHIVE_DIR, `${id}.zip`);
+    const rawName = decodeURIComponent(String(req.headers["x-archive-name"] || "figoai-project.zip")).slice(0, 160);
+    const fileName = `${path.basename(rawName).replace(/[^a-zA-Z0-9._-]/g, "-").replace(/-+/g, "-").replace(/\.zip$/i, "") || "figoai-project"}.zip`;
+    fs.writeFileSync(filePath, req.body, { flag: "wx" });
+    const expiresAt = Date.now() + ZIP_LINK_TTL_MS;
+    zipArchives.set(id, { filePath, fileName, expiresAt, createdAt: Date.now(), userId: req.user.id });
+    const baseUrl = (process.env.SERVER_URL || `${req.protocol}://${req.get("host")}`).replace(/\/$/, "");
+    return res.status(201).json({ success: true, downloadUrl: `${baseUrl}/download/${id}`, expiresAt });
+  } catch (error) {
+    console.error("ZIP upload error:", error.message);
+    return res.status(500).json({ success: false, error: "Could not store the ZIP archive." });
+  }
+});
+
+app.get("/download/:id", (req, res) => {
+  const id = String(req.params.id || "");
+  if (!/^[a-f0-9]{48}$/.test(id)) return res.status(404).send("Download not found.");
+  const archive = zipArchives.get(id);
+  if (!archive) return res.status(410).send("This download link has expired or is no longer available.");
+  if (archive.expiresAt <= Date.now() || !fs.existsSync(archive.filePath)) {
+    try { fs.rmSync(archive.filePath, { force: true }); } catch { /* best-effort cleanup */ }
+    zipArchives.delete(id);
+    return res.status(410).send("This download link has expired or is no longer available.");
+  }
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  return res.download(archive.filePath, archive.fileName);
+});
+
 /*
 |--------------------------------------------------------------------------
 | Auth Routes
 |--------------------------------------------------------------------------
 */
+app.post("/api/auth/guest", (req, res) => {
+  try {
+    const id = `guest-${crypto.randomUUID()}`;
+    const user = { id, username: "guest", displayName: "Guest", isGuest: true };
+    const token = signToken(user, null, process.env.GUEST_JWT_EXPIRES_IN || "7d");
+    return res.json({ success: true, token, user });
+  } catch (error) {
+    console.error("Guest session error:", error.message);
+    return res.status(500).json({ success: false, error: "Could not start a guest session" });
+  }
+});
+
 app.post("/api/auth/register", async (req, res) => {
   try {
     const { username, email, password } = req.body || {};
@@ -679,7 +790,11 @@ app.post("/api/chat", authenticate, async (req, res) => {
   try {
     const userMessage = req.body.message;
     const temperature = typeof req.body.temperature === "number" ? req.body.temperature : 0.7;
-    const requestedModel = ALLOWED_MODELS.includes(req.body.model) ? req.body.model : MODEL;
+    const userTextForRouting = String(req.body.message || "");
+    const codingIntent = /\b(code|coding|program|programming|debug|bug|function|class|javascript|typescript|python|php|html|css|sql|react|node\.js|api|database|algorithm|compiler|refactor|stack trace)\b/i.test(userTextForRouting);
+    const requestedModel = codingIntent
+      ? CODING_MODEL
+      : (req.body.model === CODING_MODEL ? CODING_MODEL : MODEL);
     const deepResearch = req.body.deepResearch === true;
     const replyLanguage = LANGUAGE_NAMES[req.body.language];
     const personalizationPrompt = buildPersonalizationPrompt(req.body.personalization);
@@ -709,7 +824,7 @@ app.post("/api/chat", authenticate, async (req, res) => {
     // actually support a reasoning_effort dial; that's the real lever for
     // visibly smarter (if slower) answers, so wire the toggle to that instead.
     const smartMode = req.body.smart === true;
-    const supportsReasoningEffort = requestedModelForCompletion.startsWith("openai/gpt-oss");
+    const supportsReasoningEffort = false;
 
     // Workspace: the client sends workspaceEnabled once it has a booted
     // WebContainer to run tools against, plus (on continuation calls within
@@ -719,7 +834,7 @@ app.post("/api/chat", authenticate, async (req, res) => {
     // doesn't support tool calling, so image attachments disable it too.
     const workspaceEnabled = req.body.workspaceEnabled === true
       && imageAttachments.length === 0
-      && requestedModelForCompletion.startsWith("openai/gpt-oss");
+      && requestedModelForCompletion === CODING_MODEL;
     const rawToolTurn = Array.isArray(req.body.toolTurn) ? req.body.toolTurn : [];
     // Each round is one assistant tool_calls message; cap it server-side so a
     // model stuck calling tools can't loop forever on the user's Groq quota.
@@ -782,18 +897,23 @@ app.post("/api/chat", authenticate, async (req, res) => {
           (replyLanguage
             ? ` Always reply in ${replyLanguage}, regardless of what language the user writes in.`
             : " Reply in the same language the user's most recent message is written in. If that message is too short or ambiguous to tell, use the language the conversation has been in so far, or default to English. Never switch languages on your own — only switch if the user explicitly writes in, or asks for, a different language.") +
+          (replyLanguage === "Kinyarwanda"
+            ? " Write naturally in standard Kinyarwanda (Ikinyarwanda). Preserve Kinyarwanda spelling and diacritics where applicable, explain technical terms clearly, and do not invent translations. When a word or technical phrase is uncertain, keep the standard term and explain it in Kinyarwanda."
+            : replyLanguage === "Spanish"
+              ? " Write in clear, natural Spanish with correct accents and punctuation. Use broadly understandable Spanish and keep technical explanations accessible."
+              : "") +
           (workspaceEnabled
-            ? " The user has a sandboxed Workspace open — a real but isolated Node.js filesystem and terminal only you and they can see, not the real internet or their actual computer. Use the read_file, write_file, list_dir, and run_command tools to actually build/inspect/run things there instead of just describing code. Prefer running a command to verify something (e.g. actually running a script) over guessing at its output. Keep tool calls purposeful — don't explore aimlessly."
-            : "") +
+            ? " The user has a sandboxed Workspace open — a real but isolated Node.js filesystem and terminal only you and they can see, not the real internet or their actual computer. Use the read_file, write_file, list_dir, and run_command tools to actually build/inspect/run things there instead of just describing code. When the user asks to package or ZIP a project folder, use zip_folder and tell them the download link is in the Workspace panel and expires after two hours. The ZIP process automatically excludes .env files and private keys. Prefer running a command to verify something (e.g. actually running a script) over guessing at its output. Keep tool calls purposeful — don't explore aimlessly."
+            : " If the user asks you to package a project into a ZIP but the Workspace is not open, tell them to open Workspace from the add menu and ask again so you can package the project files. ") +
           personalizationPrompt,
       },
       ...trimmed,
       ...toolTurn,
     ];
 
-    console.log("Sending request to Groq...");
+    console.log(`Sending request to OpenRouter using ${requestedModelForCompletion}...`);
 
-    // Call Groq
+    // Call OpenRouter
     let response;
     let usedModel = requestedModelForCompletion;
     try {
@@ -809,8 +929,10 @@ app.post("/api/chat", authenticate, async (req, res) => {
         },
         {
           headers: {
-            Authorization: `Bearer ${requestedModelForCompletion.startsWith("groq/compound") ? SEARCH_API_KEY : AI_API_KEY}`,
+            Authorization: `Bearer ${AI_API_KEY}`,
             "Content-Type": "application/json",
+            "HTTP-Referer": process.env.CLIENT_URL || "http://localhost:5173",
+            "X-Title": "Figo AI",
           },
           timeout: deepResearch ? 120000 : 60000,
         }
@@ -824,7 +946,7 @@ app.post("/api/chat", authenticate, async (req, res) => {
       // model and answer without live search instead of failing the turn.
       const code = error.response?.data?.error?.code;
       const isRateLimited = error.response?.status === 429 || code === "rate_limit_exceeded" || code === "request_too_large";
-      if (!isRateLimited || !requestedModelForCompletion.startsWith("groq/compound")) throw error;
+      if (!isRateLimited || !false) throw error;
 
       console.warn(`Groq compound rate-limited — falling back to ${MODEL} for this reply`);
       usedModel = MODEL;
@@ -841,6 +963,8 @@ app.post("/api/chat", authenticate, async (req, res) => {
           headers: {
             Authorization: `Bearer ${AI_API_KEY}`,
             "Content-Type": "application/json",
+            "HTTP-Referer": process.env.CLIENT_URL || "http://localhost:5173",
+            "X-Title": "Figo AI",
           },
           timeout: deepResearch ? 120000 : 60000,
         }
@@ -969,7 +1093,7 @@ app.post("/api/chat/title", authenticate, async (req, res) => {
       AI_URL,
       {
         // Small/fast model — this is a cheap one-line summary, not a real answer.
-        model: "openai/gpt-oss-20b",
+        model: OPENROUTER_TITLE_MODEL,
         messages: [
           {
             role: "system",
@@ -983,11 +1107,10 @@ app.post("/api/chat/title", authenticate, async (req, res) => {
         ],
         temperature: 0.3,
         max_tokens: 150,
-        reasoning_effort: "low",
         stream: false,
       },
       {
-        headers: { Authorization: `Bearer ${AI_API_KEY}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${AI_API_KEY}`, "Content-Type": "application/json", "HTTP-Referer": process.env.CLIENT_URL || "http://localhost:5173", "X-Title": "Figo AI" },
         timeout: 15000,
       }
     );
@@ -1063,7 +1186,7 @@ app.post("/api/voice/transcribe", authenticate, async (req, res) => {
     // languages without picking one first. A hint is only sent when the
     // caller passes one (see the client's low-confidence fallback), which
     // biases decoding toward that locale instead of forcing it.
-    if (typeof language === "string" && language && language !== "auto" && LANGUAGE_NAMES[language]) {
+    if (typeof language === "string" && language && language !== "auto" && language !== "rw" && LANGUAGE_NAMES[language]) {
       form.append("language", language);
     }
 
@@ -1098,6 +1221,39 @@ app.post("/api/voice/transcribe", authenticate, async (req, res) => {
   }
 });
 
+// Groq text-to-speech for spoken assistant replies.
+app.post("/api/voice/speak", authenticate, async (req, res) => {
+  try {
+    const { text: speechText } = req.body || {};
+    if (typeof speechText !== "string" || !speechText.trim()) {
+      return res.status(400).json({ success: false, error: "Text is required" });
+    }
+    if (!TTS_API_KEY) return res.status(503).json({ success: false, error: "Groq voice output is not configured" });
+    const response = await fetch("https://api.groq.com/openai/v1/audio/speech", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TTS_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: process.env.GROQ_TTS_MODEL || "canopylabs/orpheus-v1-english",
+        voice: process.env.GROQ_TTS_VOICE || "troy",
+        input: speechText.trim().slice(0, 4000),
+        response_format: "wav",
+      }),
+      signal: AbortSignal.timeout(45000),
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      console.error("Groq TTS error:", response.status, detail);
+      return res.status(502).json({ success: false, error: "Could not generate voice output" });
+    }
+    res.setHeader("Content-Type", response.headers.get("content-type") || "audio/wav");
+    res.setHeader("Cache-Control", "no-store");
+    return res.send(Buffer.from(await response.arrayBuffer()));
+  } catch (error) {
+    console.error("Voice output error:", error.message);
+    return res.status(500).json({ success: false, error: "Could not generate voice output" });
+  }
+});
+
 /*
 |--------------------------------------------------------------------------
 | Serve the built frontend (production)
@@ -1129,8 +1285,8 @@ if (fs.existsSync(clientDist)) {
 async function start() {
   await ensureDbReady();
 
-  const server = app.listen(PORT, () => {
-    console.log(`Server running at: http://localhost:${PORT}`);
+  const server = app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server listening on 0.0.0.0:${PORT}`);
     console.log(`Using model: ${MODEL}`);
     console.log("Ready for requests...");
   });
